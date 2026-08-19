@@ -1,0 +1,20 @@
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Secrets
+.env
+backend/.env
+.vercel
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
