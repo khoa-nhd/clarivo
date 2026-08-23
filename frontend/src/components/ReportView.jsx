@@ -1,5 +1,5 @@
 import ScoreBar from './ScoreBar.jsx'
-import PlaceholderModule from './PlaceholderModule.jsx'
+import DeliverySummary from './DeliverySummary.jsx'
 
 const scoreLabels = {
   correctness: 'Correctness',
@@ -24,7 +24,7 @@ function severityClass(severity = '') {
   return 'severity-medium'
 }
 
-export default function ReportView({ result }) {
+export default function ReportView({ result, delivery, deliveryError }) {
   const scores = result?.scores || {}
   const issues = Array.isArray(result?.issues) ? result.issues : []
   const priorities = Array.isArray(result?.top_priorities) ? result.top_priorities : []
@@ -39,35 +39,31 @@ export default function ReportView({ result }) {
           </div>
           <div>
             <div className="eyebrow">Content score</div>
-            <h2>Your explanation report</h2>
-            <p>Generated from the transcript using the content-analysis rubric.</p>
-            <span className="provider-tag">{result?.meta?.provider || 'AI'} · {result?.meta?.model || 'content evaluator'}</span>
+            <h2>Content report</h2>
+            
+
           </div>
         </div>
         <div className="score-grid">
-          {Object.entries(scoreLabels).map(([key, label]) => (
-            <ScoreBar key={key} label={label} value={scores[key]} />
-          ))}
+          {Object.entries(scoreLabels).map(([key, label]) => <ScoreBar key={key} label={label} value={scores[key]} />)}
         </div>
       </section>
+
+      <DeliverySummary delivery={delivery} error={deliveryError} />
 
       <section className="feedback-card">
         <div className="feedback-marker">AI</div>
         <div>
-          <div className="eyebrow">Overall feedback</div>
+          <div className="eyebrow">Summary</div>
           <p>{result?.feedback || 'No summary feedback returned.'}</p>
         </div>
       </section>
 
       <section className="report-section">
         <div className="section-heading">
-          <div>
-            <div className="eyebrow">Diagnostic feedback</div>
-            <h2>What to improve</h2>
-          </div>
+          <div><div className="eyebrow">Feedback</div><h2>What to improve</h2></div>
           <span>{issues.length} issue{issues.length === 1 ? '' : 's'}</span>
         </div>
-
         {issues.length === 0 ? (
           <div className="clean-card">No major issues were detected in this explanation.</div>
         ) : (
@@ -91,16 +87,10 @@ export default function ReportView({ result }) {
       </section>
 
       <section className="priority-section">
-        <div>
-          <div className="eyebrow">Next attempt</div>
-          <h2>Top priorities</h2>
-        </div>
+        <div><div className="eyebrow">Next attempt</div><h2>Priorities</h2></div>
         <div className="priority-list">
           {priorities.length ? priorities.map((priority, index) => (
-            <div className="priority-item" key={`${priority}-${index}`}>
-              <span>{String(index + 1).padStart(2, '0')}</span>
-              <p>{priority}</p>
-            </div>
+            <div className="priority-item" key={`${priority}-${index}`}><span>{String(index + 1).padStart(2, '0')}</span><p>{priority}</p></div>
           )) : <p className="muted">No priorities returned.</p>}
         </div>
       </section>
@@ -108,27 +98,9 @@ export default function ReportView({ result }) {
       {result?.revision_guidance && (
         <section className="feedback-card revision-card">
           <div className="feedback-marker">↻</div>
-          <div>
-            <div className="eyebrow">Revision guidance</div>
-            <p>{result.revision_guidance}</p>
-          </div>
+          <div><div className="eyebrow">Try next</div><p>{result.revision_guidance}</p></div>
         </section>
       )}
-
-      <section className="future-modules">
-        <PlaceholderModule
-          eyebrow="Phase 2"
-          title="Delivery analysis"
-          description="Speaking pace, pauses, filler words, volume, rhythm and confidence will plug into this reserved module."
-          icon="◉"
-        />
-        <PlaceholderModule
-          eyebrow="Phase 3"
-          title="Visual communication"
-          description="Eye contact, head direction, posture and gestures will plug into this reserved computer-vision module."
-          icon="◇"
-        />
-      </section>
     </div>
   )
 }

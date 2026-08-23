@@ -1,4 +1,5 @@
 const labels = {
+  preparing: 'Saving',
   queued: 'Queued',
   processing: 'Analyzing',
   complete: 'Complete',

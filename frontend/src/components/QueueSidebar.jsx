@@ -11,7 +11,7 @@ function relativeTime(iso) {
   return new Date(iso).toLocaleDateString()
 }
 
-export default function QueueSidebar({ sessions, activeId, counts, onSelect, onNew, onDelete }) {
+export default function QueueSidebar({ sessions, activeId, counts, onSelect, onDelete }) {
   function handleKeyDown(event, id) {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault()
@@ -29,12 +29,9 @@ export default function QueueSidebar({ sessions, activeId, counts, onSelect, onN
     <aside className="queue-panel">
       <div className="queue-header">
         <div>
-          <div className="eyebrow">Workspace</div>
-          <h2>Session queue</h2>
+          
+          <h2>Sessions</h2>
         </div>
-        <button className="icon-button" onClick={onNew} title="New session" aria-label="New session">
-          +
-        </button>
       </div>
 
       <div className="queue-summary">
@@ -48,7 +45,7 @@ export default function QueueSidebar({ sessions, activeId, counts, onSelect, onN
           <div className="queue-empty">
             <div className="empty-orbit">◎</div>
             <p>No sessions yet.</p>
-            <span>Your transcript jobs will appear here.</span>
+            
           </div>
         ) : sessions.map((session, index) => (
           <div
@@ -77,18 +74,18 @@ export default function QueueSidebar({ sessions, activeId, counts, onSelect, onN
             </div>
             <strong>{session.topic}</strong>
             <p>{session.targetAudience}</p>
+            {session.drill?.rounds?.length > 0 && (
+              <div className="queue-learning-progress">
+                <span>Q&A {session.drill.rounds.length}/{session.drill.maxRounds || 3}</span>
+                <span>{Math.round(session.drill.coreConceptsCoverage || 0)}% coverage</span>
+              </div>
+            )}
             <span className="queue-time">{relativeTime(session.createdAt)}</span>
           </div>
         ))}
       </div>
 
-      <div className="queue-note">
-        <span className="privacy-icon">◌</span>
-        <div>
-          <strong>Browser queue</strong>
-          <p>Sessions are stored on this device and resume after refresh.</p>
-        </div>
-      </div>
+
     </aside>
   )
 }

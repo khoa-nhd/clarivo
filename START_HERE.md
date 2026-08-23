@@ -1,27 +1,20 @@
-# Clarivo — START HERE
+# Start here
 
-## Local
+For the **full Clarivo build (Content + Voice + Visual)** on your Intel laptop, follow:
 
-### Backend
+- `RUN_FULL_LOCAL_WINDOWS.md`
+
+The important first-time setup is:
+
 ```powershell
 cd backend
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements-local.txt
+.\.venv\Scripts\python.exe -m local_scoring.setup_delivery_models
 Copy-Item .env.example .env
 notepad .env
-.\.venv\Scripts\python.exe -m uvicorn main:app --reload --port 8000
 ```
 
-Fill your real Cloudflare Account ID and Workers AI token in `backend/.env`.
+Set your existing Cloudflare credentials and `LOCAL_SCORING_ENABLED=true`, then run the backend and frontend as described in the guide.
 
-### Frontend
-```powershell
-cd frontend
-npm.cmd install
-npm.cmd run dev
-```
-
-Open `http://localhost:5173`.
-
-## Public
-Read `DEPLOY_PUBLIC.md`.
+The existing Vercel deployment remains suitable for transcript + content analysis. The v11 OpenVINO/YOLO delivery engine is intentionally local in this build.

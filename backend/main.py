@@ -1,18 +1,39 @@
 """Clarivo FastAPI application used locally and by Vercel."""
 
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from starlette.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
 from app.cloudflare_transcription import transcribe_audio
 from app.evaluator import evaluate_explanation
-from app.schemas import AnalysisRequest, AnalysisResult, TranscriptionResult
+from app.drill_engine import DrillAIError, evaluate_qa_round, finalize_drill, generate_initial_drills, refresh_topics
+from app.schemas import (
+    AnalysisRequest,
+    AnalysisResult,
+    DrillGenerateRequest,
+    DrillGenerateResult,
+    FinalizeDrillRequest,
+    FinalizeDrillResult,
+    QAEvaluateRequest,
+    QAEvaluateResult,
+    TopicRefreshRequest,
+    TopicRefreshResult,
+    TranscriptionResult,
+)
+from app.local_delivery import (
+    analyze_audio_file,
+    analyze_delivery_files,
+    analyze_vision_file,
+    capability_payload,
+)
 
-app = FastAPI(title="Clarivo API", version="1.2.0")
+app = FastAPI(title="Clarivo API", version="1.4.0")
 
 
 def _allowed_origins() -> list[str]:
@@ -66,6 +87,15 @@ def health():
         "model": model,
         "transcription_provider": transcription_provider,
         "transcription_model": transcription_model,
+        "delivery_analysis": capability_payload(),
+        "learning_loop": {
+            "enabled": True,
+            "qa_scoring_mode": "isolated_current_q_and_a",
+            "same_type_followups": True,
+            "topic_refresh": True,
+            "max_rounds": int(os.getenv("DRILL_MAX_ROUNDS", "3")),
+            "qa_criteria": ["accuracy", "directness", "consistency", "relevance", "audience_fit"],
+        },
     }
 
 
@@ -196,4 +226,200 @@ def analyze(request: AnalysisRequest):
         raise HTTPException(
             status_code=502,
             detail="Clarivo could not finish this analysis. Please retry the session.",
+        ) from exc
+
+
+
+
+def _drill_http_error(exc: Exception) -> HTTPException:
+    message = str(exc)
+    lowered = message.lower()
+    if "rate limit" in lowered or "too many requests" in lowered or "http 429" in lowered:
+        return HTTPException(status_code=429, detail="The free AI service is busy right now. Please wait a moment and retry.")
+    if "quota" in lowered or "neurons" in lowered or "daily" in lowered:
+        return HTTPException(status_code=429, detail="Clarivo has reached today's free AI allowance. Please try again after the daily reset.")
+    if "credential" in lowered or "account_id" in lowered or "auth_token" in lowered or "token" in lowered:
+        return HTTPException(status_code=503, detail="The AI service is not configured correctly on the server.")
+    return HTTPException(status_code=502, detail="Clarivo could not finish this learning drill. Please retry.")
+
+
+
+
+@app.post("/api/topics/refresh", response_model=TopicRefreshResult)
+def refresh_topic_library(request: TopicRefreshRequest):
+    try:
+        return refresh_topics(request)
+    except Exception as exc:
+        raise _drill_http_error(exc) from exc
+
+
+@app.post("/api/drills/generate", response_model=DrillGenerateResult)
+def generate_drills(request: DrillGenerateRequest):
+    try:
+        return generate_initial_drills(request)
+    except Exception as exc:
+        raise _drill_http_error(exc) from exc
+
+
+@app.post("/api/drills/evaluate", response_model=QAEvaluateResult, response_model_exclude_none=True)
+def evaluate_drill_answer(request: QAEvaluateRequest):
+    try:
+        return evaluate_qa_round(request)
+    except Exception as exc:
+        raise _drill_http_error(exc) from exc
+
+
+@app.post("/api/drills/finalize", response_model=FinalizeDrillResult)
+def finalize_drill_session(request: FinalizeDrillRequest):
+    try:
+        return finalize_drill(request)
+    except Exception as exc:
+        raise _drill_http_error(exc) from exc
+
+@app.post("/api/analyze/audio")
+async def analyze_audio_delivery(
+    audio_wav: UploadFile = File(...),
+    transcript: str = Form(...),
+    duration_seconds: float = Form(default=0),
+):
+    capability = capability_payload()
+    if not capability["enabled"]:
+        raise HTTPException(status_code=503, detail="Local audio analysis is not enabled on this backend.")
+
+    max_seconds = int(os.getenv("MAX_RECORDING_SECONDS", "300"))
+    if duration_seconds > max_seconds + 5:
+        raise HTTPException(status_code=413, detail="Recording is longer than the local analysis limit.")
+    if len(transcript.strip()) < 10:
+        raise HTTPException(status_code=400, detail="A transcript is required for audio analysis.")
+
+    max_audio = int(os.getenv("LOCAL_MAX_AUDIO_WAV_BYTES", "16000000"))
+    audio_data = await audio_wav.read(max_audio + 1)
+    if not audio_data:
+        raise HTTPException(status_code=400, detail="Audio recording is required for audio analysis.")
+    if len(audio_data) > max_audio:
+        raise HTTPException(status_code=413, detail="Local WAV recording is too large.")
+
+    try:
+        return await run_in_threadpool(
+            analyze_audio_file,
+            audio_wav_bytes=audio_data,
+            transcript=transcript,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Local audio analysis failed: {type(exc).__name__}: {exc}",
+        ) from exc
+
+
+@app.post("/api/analyze/vision")
+async def analyze_visual_delivery(
+    video: UploadFile = File(...),
+    duration_seconds: float = Form(default=0),
+):
+    capability = capability_payload()
+    if not capability["enabled"]:
+        raise HTTPException(status_code=503, detail="Local vision analysis is not enabled on this backend.")
+    if not capability["vision_ready"]:
+        raise HTTPException(
+            status_code=503,
+            detail="Local OpenVINO vision models are not ready. Run the delivery model setup command first.",
+        )
+
+    max_seconds = int(os.getenv("MAX_RECORDING_SECONDS", "300"))
+    if duration_seconds > max_seconds + 5:
+        raise HTTPException(status_code=413, detail="Recording is longer than the local analysis limit.")
+
+    max_video = int(os.getenv("LOCAL_MAX_VIDEO_BYTES", "80000000"))
+    video_data = await video.read(max_video + 1)
+    if not video_data:
+        raise HTTPException(status_code=400, detail="Camera video is required for visual analysis.")
+    if len(video_data) > max_video:
+        raise HTTPException(status_code=413, detail="Local camera recording is too large.")
+
+    filename = video.filename or "camera.webm"
+    suffix = Path(filename).suffix or ".webm"
+    try:
+        return await run_in_threadpool(
+            analyze_vision_file,
+            video_bytes=video_data,
+            video_suffix=suffix,
+        )
+    except Exception as exc:
+        message = str(exc)
+        lowered = message.lower()
+        if "models are missing" in lowered or "models are not ready" in lowered:
+            raise HTTPException(status_code=503, detail=message) from exc
+        if "could not open video" in lowered or ("video" in lowered and "open" in lowered):
+            raise HTTPException(
+                status_code=422,
+                detail="Clarivo could not decode this browser camera recording locally. Try Chrome/Edge and record again.",
+            ) from exc
+        raise HTTPException(
+            status_code=500,
+            detail=f"Local visual analysis failed: {type(exc).__name__}: {message}",
+        ) from exc
+
+
+@app.post("/api/analyze/delivery")
+async def analyze_delivery(
+    audio_wav: UploadFile = File(...),
+    video: UploadFile = File(...),
+    transcript: str = Form(...),
+    duration_seconds: float = Form(default=0),
+):
+    capability = capability_payload()
+    if not capability["enabled"]:
+        raise HTTPException(
+            status_code=503,
+            detail="Local OpenVINO delivery analysis is not enabled on this backend.",
+        )
+    if not capability["models_ready"]:
+        raise HTTPException(
+            status_code=503,
+            detail="Local OpenVINO models are not ready. Run the delivery model setup command first.",
+        )
+
+    max_seconds = int(os.getenv("MAX_RECORDING_SECONDS", "300"))
+    if duration_seconds > max_seconds + 5:
+        raise HTTPException(status_code=413, detail="Recording is longer than the local analysis limit.")
+    if len(transcript.strip()) < 10:
+        raise HTTPException(status_code=400, detail="A transcript is required for delivery analysis.")
+
+    max_audio = int(os.getenv("LOCAL_MAX_AUDIO_WAV_BYTES", "16000000"))
+    max_video = int(os.getenv("LOCAL_MAX_VIDEO_BYTES", "80000000"))
+    audio_data = await audio_wav.read(max_audio + 1)
+    video_data = await video.read(max_video + 1)
+    if not audio_data or not video_data:
+        raise HTTPException(status_code=400, detail="Audio and camera video are both required for delivery analysis.")
+    if len(audio_data) > max_audio:
+        raise HTTPException(status_code=413, detail="Local WAV recording is too large.")
+    if len(video_data) > max_video:
+        raise HTTPException(status_code=413, detail="Local camera recording is too large.")
+
+    filename = video.filename or "camera.webm"
+    suffix = Path(filename).suffix or ".webm"
+    try:
+        return await run_in_threadpool(
+            analyze_delivery_files,
+            audio_wav_bytes=audio_data,
+            video_bytes=video_data,
+            video_suffix=suffix,
+            transcript=transcript,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        message = str(exc)
+        lowered = message.lower()
+        if "models are missing" in lowered or "models are not ready" in lowered:
+            raise HTTPException(status_code=503, detail=message) from exc
+        if "could not open video" in lowered or "video" in lowered and "open" in lowered:
+            raise HTTPException(
+                status_code=422,
+                detail="Clarivo could not decode this browser camera recording locally. Try Chrome/Edge and record again.",
+            ) from exc
+        raise HTTPException(
+            status_code=500,
+            detail=f"Local delivery analysis failed: {type(exc).__name__}: {message}",
         ) from exc

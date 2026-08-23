@@ -1,6 +1,7 @@
 import QueueSidebar from './components/QueueSidebar.jsx'
 import NewSessionForm from './components/NewSessionForm.jsx'
 import SessionView from './components/SessionView.jsx'
+import TutorialBanner from './components/TutorialBanner.jsx'
 import { useSessionQueue } from './hooks/useSessionQueue.js'
 
 export default function App() {
@@ -13,14 +14,12 @@ export default function App() {
           <span className="brand-mark">C</span>
           <span>Clarivo</span>
         </button>
-        <div className="topbar-center">
-          <span className="product-chip"><i /> Content + transcript ready</span>
-        </div>
         <div className="topbar-right">
-          <span className="version-chip">MVP · Record → transcript</span>
           <button className="new-top-button" onClick={queue.startNewSession}>+ New session</button>
         </div>
       </header>
+
+      {!queue.activeSession && <TutorialBanner />}
 
       <div className="workspace-layout">
         {queue.activeSession ? (
@@ -30,6 +29,9 @@ export default function App() {
             onRetry={queue.retrySession}
             onDelete={queue.removeSession}
             onUpdateTranscript={queue.updateTranscript}
+            onAnswerDrill={queue.submitDrillAnswer}
+            onRegenerateDrills={queue.regenerateDrills}
+            onFinalizeDrills={queue.finishDrills}
           />
         ) : (
           <NewSessionForm
@@ -43,7 +45,6 @@ export default function App() {
           activeId={queue.activeId}
           counts={queue.counts}
           onSelect={queue.setActiveId}
-          onNew={queue.startNewSession}
           onDelete={queue.removeSession}
         />
       </div>

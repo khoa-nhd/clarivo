@@ -1,7 +1,7 @@
 import StatusPill from './StatusPill.jsx'
 import ReportView from './ReportView.jsx'
-import PlaceholderModule from './PlaceholderModule.jsx'
 import TranscriptCard from './TranscriptCard.jsx'
+import InteractiveDrill from './InteractiveDrill.jsx'
 
 function formatDate(iso) {
   return new Date(iso).toLocaleString([], {
@@ -9,7 +9,21 @@ function formatDate(iso) {
   })
 }
 
-export default function SessionView({ session, onNew, onRetry, onDelete, onUpdateTranscript }) {
+function moduleLabel(name, state, fallbackReady = false) {
+  if (state === 'complete') return `${name} scored`
+  if (state === 'processing') return `${name} analyzing`
+  if (state === 'error') return `${name} unavailable`
+  if (state === 'unavailable') return `${name} unavailable`
+  if (fallbackReady) return `${name} ready`
+  return name
+}
+
+export default function SessionView({ session, onNew, onRetry, onDelete, onUpdateTranscript, onAnswerDrill, onRegenerateDrills, onFinalizeDrills }) {
+  const states = session.analysisState || {}
+  const contentDone = Boolean(session.result) || states.content === 'complete'
+  const voiceDone = Boolean(session.delivery?.voice) || states.audio === 'complete'
+  const visualDone = Boolean(session.delivery?.visual) || states.vision === 'complete'
+
   return (
     <main className="workspace-main session-page">
       <div className="session-toolbar">
@@ -32,19 +46,28 @@ export default function SessionView({ session, onNew, onRetry, onDelete, onUpdat
           <h1>{session.topic}</h1>
         </div>
         <div className="session-modules-mini">
-          <span className="module-mini active">Content</span>
-          <span className={`module-mini ${session.audio ? 'audio-captured' : ''}`}>{session.audio ? 'Audio captured' : 'Audio later'}</span>
-          <span className="module-mini">Vision later</span>
+          <span className={`module-mini ${contentDone ? 'active' : ''}`}>{moduleLabel('Content', states.content, Boolean(session.transcript))}</span>
+          <span className={`module-mini ${voiceDone ? 'audio-captured' : ''}`}>{moduleLabel('Voice', states.audio, Boolean(session.audio))}</span>
+          <span className={`module-mini ${visualDone ? 'audio-captured' : ''}`}>{moduleLabel('Visual', states.vision, Boolean(session.video))}</span>
         </div>
       </section>
 
-      {session.status === 'queued' && (
+      {session.topicProfile && (
+        <section className="session-topic-brief">
+          <div><span>Domain</span><strong>{session.topicProfile.domain}</strong></div>
+          <div><span>Difficulty</span><strong>{session.topicProfile.difficulty}</strong></div>
+          <div className="session-topic-brief-wide"><span>Practice task</span><strong>{session.topicProfile.taskDescription}</strong></div>
+          <div className="session-keywords">{(session.topicProfile.preStudyKeywords || []).map((keyword) => <span key={keyword}>{keyword}</span>)}</div>
+        </section>
+      )}
+
+      {['preparing', 'queued'].includes(session.status) && (
         <section className="state-card queued-state">
           <div className="state-visual"><span>1</span><i /><i /><i /></div>
           <div>
-            <div className="eyebrow">Waiting in queue</div>
-            <h2>Your transcript is ready.</h2>
-            <p>Another session is currently using the evaluator. You can create more sessions or inspect completed reports while this waits.</p>
+            <div className="eyebrow">Queued</div>
+            <h2>Waiting to analyze</h2>
+            
           </div>
         </section>
       )}
@@ -53,9 +76,9 @@ export default function SessionView({ session, onNew, onRetry, onDelete, onUpdat
         <section className="state-card processing-state">
           <div className="loader-orbit"><span /></div>
           <div>
-            <div className="eyebrow">Qwen is analyzing</div>
-            <h2>Checking the explanation.</h2>
-            <p>Correctness → completeness → logical flow → clarity → examples → step continuity → audience fit.</p>
+            <div className="eyebrow">Analyzing</div>
+            <h2>Reviewing your presentation</h2>
+            
             <div className="analysis-progress"><span /></div>
           </div>
         </section>
@@ -66,37 +89,26 @@ export default function SessionView({ session, onNew, onRetry, onDelete, onUpdat
           <div className="error-mark">!</div>
           <div>
             <div className="eyebrow">Analysis failed</div>
-            <h2>This session needs another try.</h2>
+            <h2>Analysis failed</h2>
             <p>{session.error}</p>
             <button className="primary-button compact-button" onClick={() => onRetry(session.id)}>Retry analysis</button>
           </div>
         </section>
       )}
 
-      {session.status === 'complete' && <ReportView result={session.result} />}
+      {session.status === 'complete' && (
+        <>
+          <ReportView result={session.result} delivery={session.delivery} deliveryError={session.deliveryError} />
+          <InteractiveDrill
+            session={session}
+            onAnswer={onAnswerDrill}
+            onRegenerate={onRegenerateDrills}
+            onFinalize={onFinalizeDrills}
+          />
+        </>
+      )}
 
       <TranscriptCard session={session} onUpdateTranscript={onUpdateTranscript} />
-
-      <section className="future-modules compact-future">
-        <PlaceholderModule
-          eyebrow={session.audio ? "Recording ready" : "Reserved"}
-          title="Delivery analysis"
-          description={
-            session.audio
-              ? `The ${Math.round(session.audio.durationSeconds || 0)}s microphone recording is stored locally and ready for future pace, pauses, filler words, volume, and prosody analysis.`
-              : "Record audio when creating a session and the same recording will be available for future delivery metrics."
-          }
-          icon="◉"
-          pill={session.audio ? "Audio ready" : "Reserved"}
-          ready={Boolean(session.audio)}
-        />
-        <PlaceholderModule
-          eyebrow="Reserved"
-          title="Visual communication"
-          description="Computer-vision metrics will be attached to the same session object later."
-          icon="◇"
-        />
-      </section>
     </main>
   )
 }

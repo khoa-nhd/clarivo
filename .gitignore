@@ -18,3 +18,7 @@ backend/.env
 Thumbs.db
 .vscode/
 .idea/
+
+# Local OpenVINO artifacts
+backend/local_scoring/models/
+backend/local_scoring/cache/

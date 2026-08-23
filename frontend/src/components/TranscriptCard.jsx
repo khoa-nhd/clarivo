@@ -46,7 +46,7 @@ export default function TranscriptCard({ session, onUpdateTranscript }) {
     <section className="transcript-card">
       <div className="section-heading transcript-heading">
         <div>
-          <div className="eyebrow">Source</div>
+          
           <h2>Transcript</h2>
         </div>
         <div className="transcript-actions">
@@ -77,9 +77,7 @@ export default function TranscriptCard({ session, onUpdateTranscript }) {
             autoFocus
           />
           <div className="transcript-editor-footer">
-            <p>
-              Editing does not change the current report until you run analysis again.
-            </p>
+<p>Re-analyze to update the report.</p>
             <div className="transcript-editor-buttons">
               <button type="button" className="ghost-button" onClick={cancelEdit}>Cancel</button>
               <button
@@ -107,7 +105,7 @@ export default function TranscriptCard({ session, onUpdateTranscript }) {
 
       {session.referenceContent && (
         <details className="reference-details">
-          <summary>Reference content</summary>
+          <summary>Reference</summary>
           <p>{session.referenceContent}</p>
         </details>
       )}

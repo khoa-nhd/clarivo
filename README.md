@@ -1,35 +1,35 @@
-# Clarivo — public deploy-ready MVP
+# Clarivo — Learning Loop + Content + Delivery
 
-Clarivo is the renamed public MVP of the explanation coach. The current flow is:
+Clarivo now supports the complete practice loop:
 
-1. Record an English explanation or paste a transcript.
-2. Cloudflare Whisper creates the transcript.
-3. Review/edit the transcript.
-4. Add the session to the browser queue.
-5. Cloudflare Qwen analyzes the content using the preserved evaluator prompt/schema.
-6. Completed sessions stay in the browser; raw audio is stored locally in IndexedDB for future Delivery analysis.
+**Topic Library → Main Presentation → Editable Whisper Transcript → Content / Voice / Visual Analysis → A/B/C Interactive Drills → 5-Criterion Q&A Evaluation → Coverage / Dynamic Stopping → Final Learning Summary.**
 
-## Local run
+The existing seven-criterion Main Evaluator remains unchanged. The new drill system is a separate layer above it.
 
-Backend:
+## Quick start
+Read:
+- `RUN_LEARNING_LOOP_WINDOWS.md` — exact Windows commands
+- `LEARNING_LOOP_IMPLEMENTATION.md` — feature and architecture map
 
-```powershell
-cd backend
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-Copy-Item .env.example .env
-notepad .env
-.\.venv\Scripts\python.exe -m uvicorn main:app --reload --port 8000
-```
+## Frontend starter library
+Edit `frontend/src/data/topicLibrary.js` to add or change prepared topics.
 
-Frontend:
+## Backend drill endpoints
+- `POST /api/drills/generate`
+- `POST /api/drills/evaluate`
+- `POST /api/drills/finalize`
 
-```powershell
-cd frontend
-npm.cmd install
-npm.cmd run dev
-```
+## Q&A criteria
+- Accuracy
+- Directness
+- Consistency
+- Relevance
+- Audience Fit
 
-Open `http://localhost:5173`.
+Default `DRILL_MAX_ROUNDS=3`.
 
-For public deployment, read `DEPLOY_PUBLIC.md`.
+## Q&A / Topic Library v2 update
+
+See `QNA_TOPIC_V2_CHANGES.md` for the isolated Q&A scorer, Overall after Q&A, same-type challenge replacement, audience-style questions, main-quality Q&A guard, and refreshable Topic Library.
+
+# Final public package
