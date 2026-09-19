@@ -4,6 +4,37 @@ function apiUrl(path) {
   return `${API_BASE_URL}${path}`
 }
 
+// A hosted backend is one reached through an absolute URL. The local dev server
+// proxies /api to 127.0.0.1:8000 and has no upload ceiling, so the guard below
+// only applies to the deployed case.
+export function isHostedApi() {
+  return API_BASE_URL.length > 0
+}
+
+// Vercel rejects a function request body larger than 4.5 MB with a 413 before
+// the request reaches any application code, so there is nothing the backend can
+// do about it. 4.4 MB leaves room for the multipart envelope.
+export const HOSTED_UPLOAD_LIMIT_BYTES = Math.floor(4.4 * 1024 * 1024)
+
+// The browser uploads 16 kHz mono 16-bit WAV.
+const WAV_BYTES_PER_SECOND = 16000 * 2
+
+function describeLimit() {
+  const seconds = Math.floor(HOSTED_UPLOAD_LIMIT_BYTES / WAV_BYTES_PER_SECOND)
+  const minutes = Math.floor(seconds / 60)
+  return `${minutes}m${String(seconds % 60).padStart(2, '0')}s`
+}
+
+function assertUploadFits(blob, label) {
+  if (!isHostedApi() || !blob || blob.size <= HOSTED_UPLOAD_LIMIT_BYTES) return
+  const actual = (blob.size / 1024 / 1024).toFixed(1)
+  const cap = (HOSTED_UPLOAD_LIMIT_BYTES / 1024 / 1024).toFixed(1)
+  throw new Error(
+    `${label} is ${actual} MB, over the ${cap} MB the hosted backend can accept. ` +
+    `Keep recordings under about ${describeLimit()}, or run Clarivo locally for full-length analysis.`,
+  )
+}
+
 async function readPayload(response) {
   try {
     return await response.json()
@@ -60,6 +91,8 @@ export async function checkHealth() {
 }
 
 export async function analyzeDelivery({ audioWavBlob, videoBlob, transcript, durationSeconds = 0 }) {
+  assertUploadFits(audioWavBlob, 'The audio track')
+  assertUploadFits(videoBlob, 'The camera recording')
   const formData = new FormData()
   formData.append('audio_wav', audioWavBlob, 'presentation.wav')
   const videoExtension = videoBlob?.type?.includes('mp4') ? 'mp4' : 'webm'
@@ -78,6 +111,7 @@ export async function analyzeDelivery({ audioWavBlob, videoBlob, transcript, dur
 
 
 export async function analyzeAudioDelivery({ audioWavBlob, transcript, durationSeconds = 0 }) {
+  assertUploadFits(audioWavBlob, 'The audio track')
   const formData = new FormData()
   formData.append('audio_wav', audioWavBlob, 'presentation.wav')
   formData.append('transcript', transcript || '')
@@ -93,6 +127,7 @@ export async function analyzeAudioDelivery({ audioWavBlob, transcript, durationS
 }
 
 export async function analyzeVisionDelivery({ videoBlob, durationSeconds = 0 }) {
+  assertUploadFits(videoBlob, 'The camera recording')
   const formData = new FormData()
   const videoExtension = videoBlob?.type?.includes('mp4') ? 'mp4' : 'webm'
   formData.append('video', videoBlob, `camera.${videoExtension}`)

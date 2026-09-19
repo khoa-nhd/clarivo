@@ -4,3 +4,13 @@ requests>=2.32,<3
 pydantic>=2.9,<3
 python-dotenv>=1.0,<2
 python-multipart>=0.0.9,<1
+
+# Local VOICE analysis (pause / pace / filler / SNR).
+# Deliberately NOT the full local stack: the web path gets its transcript from
+# Cloudflare Whisper, so local ASR never runs and this needs no OpenVINO.
+# Measured bundle with these three: ~434 MB against Vercel's 500 MB Python
+# limit. Cold-start import cost is ~0.3 s because librosa loads lazily.
+# Visual analysis is NOT deployable here - see requirements-vercel-voice.txt.
+numpy>=1.26
+librosa>=0.10.2
+soundfile>=0.12.1
