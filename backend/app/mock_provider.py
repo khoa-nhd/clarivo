@@ -37,7 +37,36 @@ def run_mock(request: AnalysisRequest) -> tuple[dict, str]:
             "suggestion": "State the core idea, explain why it works, then connect the steps before concluding.",
         })
 
+    # Mock mode exists so the UI and queue can be exercised without an AI token.
+    # The evidence below is labelled as mock in its own text for the same reason
+    # the scores are fixed: it must never be mistaken for a real evaluation.
+    first_sentence = sentences[0] if sentences else request.transcript[:120]
+    dimension_evidence = {
+        "correctness": {
+            "evidence": [first_sentence],
+            "reasoning": "Mock mode does not verify claims; this is placeholder evidence.",
+            "confidence": "low",
+        },
+        "examples": {
+            "evidence": [],
+            "reasoning": (
+                "No concrete example was detected by the keyword check."
+                if not has_example
+                else "An example phrase was detected by the keyword check."
+            ),
+            "confidence": "insufficient_evidence" if not has_example else "low",
+        },
+    }
+
     return {
+        "dimension_evidence": dimension_evidence,
+        "reference_check": {
+            "reference_available": bool(request.reference_content),
+            "supported_claims": [],
+            "missing_from_transcript": [],
+            "contradicted_by_reference": [],
+            "unsupported_by_reference": [],
+        },
         "scores": {
             "correctness": 84,
             "completeness": completeness,

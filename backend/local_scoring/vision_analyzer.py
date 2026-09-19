@@ -5,14 +5,24 @@ import time
 from pathlib import Path
 from typing import Any
 
-import cv2
 import numpy as np
-import openvino as ov
-from ultralytics import YOLO
 
 from .config import VisionConfig
 from .device_utils import create_core, fallback_chain
 from .utils import clamp, piecewise_linear, safe_mean, safe_std
+
+# OpenCV and Ultralytics are only needed once a video is actually decoded or a
+# pose model is loaded. Everything else in this module - the posture geometry,
+# the gaze calibration, the temporal event rules - is pure NumPy, and those are
+# the parts carrying the scoring decisions. Importing the heavy stack at module
+# scope made them untestable and unbenchmarkable without the full CV install
+# (and `import openvino as ov` here was never used at all).
+
+
+def _cv2():
+    import cv2
+
+    return cv2
 
 COCO = {
     "nose":0, "left_eye":1, "right_eye":2, "left_ear":3, "right_ear":4,
@@ -59,6 +69,37 @@ class OpenVINOHeadTracker:
             except Exception as exc:
                 print(f"      Gaze model unavailable: {type(exc).__name__}")
 
+        # Input shapes, output ports and tensor names are fixed once a model is
+        # compiled, but were being re-read through the OpenVINO Python bindings
+        # on every single frame. Resolve them once here.
+        self._input_hw: dict[int, tuple[int, int]] = {}
+        self._face_output = self.face.output(0)
+        self._head_outputs = tuple(
+            (self._port_name(port).lower(), port) for port in self.head.outputs
+        )
+        self._landmarks_output = self.landmarks.output(0) if self.landmarks is not None else None
+        self._gaze_output = self.gaze.output(0) if self.gaze is not None else None
+        self._gaze_inputs = tuple(
+            (self._port_name(port), self._port_name(port).lower(), list(port.shape))
+            for port in (self.gaze.inputs if self.gaze is not None else ())
+        )
+
+    @staticmethod
+    def _port_name(port) -> str:
+        try:
+            return str(port.get_any_name())
+        except Exception:
+            return str(port)
+
+    def _model_hw(self, compiled) -> tuple[int, int]:
+        key = id(compiled)
+        cached = self._input_hw.get(key)
+        if cached is None:
+            _, _, h, w = list(compiled.input(0).shape)
+            cached = (int(h), int(w))
+            self._input_hw[key] = cached
+        return cached
+
     def _compile(self, xml: Path, requested: str):
         model = self.core.read_model(str(xml))
         last = None
@@ -77,18 +118,18 @@ class OpenVINOHeadTracker:
 
     @staticmethod
     def _image_blob(frame: np.ndarray, h: int, w: int) -> np.ndarray:
+        cv2 = _cv2()
         resized = cv2.resize(frame, (int(w), int(h)), interpolation=cv2.INTER_LINEAR)
         return resized.transpose(2,0,1)[None].astype(np.float32)
 
-    @classmethod
-    def _blob(cls, frame: np.ndarray, compiled) -> np.ndarray:
-        _, _, h, w = list(compiled.input(0).shape)
-        return cls._image_blob(frame, int(h), int(w))
+    def _blob(self, frame: np.ndarray, compiled) -> np.ndarray:
+        h, w = self._model_hw(compiled)
+        return self._image_blob(frame, h, w)
 
     def detect_faces(self, frame: np.ndarray, threshold: float):
         h,w = frame.shape[:2]
         result = self.face([self._blob(frame, self.face)])
-        out = np.asarray(result[self.face.output(0)]).reshape(-1,7)
+        out = np.asarray(result[self._face_output]).reshape(-1,7)
         faces=[]
         for det in out:
             conf=float(det[2])
@@ -114,11 +155,10 @@ class OpenVINOHeadTracker:
         if crop.size == 0:
             return 0.0,0.0,0.0
         result=self.head([self._blob(crop,self.head)])
-        vals={}
-        for out in self.head.outputs:
-            try: name=out.get_any_name().lower()
-            except Exception: name=str(out).lower()
-            vals[name]=float(np.asarray(result[out]).reshape(-1)[0])
+        vals={
+            name: float(np.asarray(result[port]).reshape(-1)[0])
+            for name, port in self._head_outputs
+        }
         def pick(token): return next((v for n,v in vals.items() if token in n),0.0)
         return pick("angle_y"), pick("angle_p"), pick("angle_r")
 
@@ -129,7 +169,7 @@ class OpenVINOHeadTracker:
         if crop.size == 0:
             return None
         result=self.landmarks([self._blob(crop,self.landmarks)])
-        vals=np.asarray(result[self.landmarks.output(0)]).reshape(-1)
+        vals=np.asarray(result[self._landmarks_output]).reshape(-1)
         if vals.size < 8:
             return None
         x1,y1,x2,y2=box; fw=max(1,x2-x1); fh=max(1,y2-y1)
@@ -179,10 +219,7 @@ class OpenVINOHeadTracker:
 
         yaw,pitch,roll=head_angles
         inputs={}
-        for inp in self.gaze.inputs:
-            try: name=inp.get_any_name()
-            except Exception: name=str(inp)
-            lname=name.lower(); shape=list(inp.shape)
+        for name, lname, shape in self._gaze_inputs:
             if "left_eye" in lname:
                 inputs[name]=self._image_blob(left,int(shape[-2]),int(shape[-1]))
             elif "right_eye" in lname:
@@ -192,7 +229,7 @@ class OpenVINOHeadTracker:
         if len(inputs) < 3:
             return None
         result=self.gaze(inputs)
-        vec=np.asarray(result[self.gaze.output(0)]).reshape(-1)[:3].astype(float)
+        vec=np.asarray(result[self._gaze_output]).reshape(-1)[:3].astype(float)
         norm=float(np.linalg.norm(vec))
         if norm < 1e-6:
             return None
@@ -216,6 +253,8 @@ class OpenVINOHeadTracker:
 
 class PoseTracker:
     def __init__(self, model_dir: Path, requested: str, confidence: float, imgsz: int = 512):
+        from ultralytics import YOLO
+
         self.model = YOLO(str(model_dir), task="pose")
         self.requested = requested.upper()
         self.confidence = confidence
@@ -643,20 +682,6 @@ class PostureCalibrator:
         return issues[0]
 
 
-def _posture_score(shoulder, torso, roll, cfg, *, baseline: dict[str, float] | None = None):
-    """Backward-compatible helper retained for old imports/tests.
-
-    New code uses PostureCalibrator; this helper is intentionally conservative.
-    """
-    shoulder = abs(float(shoulder))
-    torso = abs(float(torso))
-    roll = abs(float(roll))
-    a=piecewise_linear(shoulder,[(0,100),(8,95),(18,72),(30,35),(50,0)])
-    b=piecewise_linear(torso,[(0,100),(8,95),(16,75),(28,40),(45,0)])
-    c=piecewise_linear(roll,[(0,100),(10,95),(22,70),(35,35),(55,0)])
-    return clamp(.2*a+.6*b+.2*c)
-
-
 class GestureTracker:
     """Arm-motion tracker that favors sustained intentional movement over jitter."""
 
@@ -765,43 +790,6 @@ class GestureTracker:
                 "event_count":self.event_count,"motion_mean_norm":mean,"motion_p90_norm":p90,"level":level}
 
 
-def _gesture_score(active,visible):
-    # Informational only. v6 also avoids inflated 95-100 gesture scores.
-    a=piecewise_linear(active,[(0,40),(5,52),(15,72),(30,84),(45,88),(70,75),(100,52)])
-    v=piecewise_linear(visible,[(0,30),(20,48),(50,70),(80,88),(100,92)])
-    return clamp(.65*a+.35*v)
-
-
-def _sustained_state_stats(states: list[str], target: str, sample_fps: float, grace_seconds: float) -> tuple[float, int, float]:
-    """Return sustained seconds, episode count and percent of sampled session.
-
-    Short glances are ignored instead of being scored as failures.  This makes head
-    orientation behave like presentation coaching rather than eye-contact policing.
-    """
-    if not states:
-        return 0.0, 0, 0.0
-    fps = max(float(sample_fps), 0.1)
-    min_frames = max(1, int(math.ceil(grace_seconds * fps)))
-    total_frames = 0
-    episodes = 0
-    i = 0
-    while i < len(states):
-        if states[i] != target:
-            i += 1
-            continue
-        j = i + 1
-        while j < len(states) and states[j] == target:
-            j += 1
-        run = j - i
-        if run >= min_frames:
-            episodes += 1
-            total_frames += run
-        i = j
-    seconds = total_frames / fps
-    pct = 100.0 * total_frames / len(states)
-    return seconds, episodes, pct
-
-
 def _temporal_violation_stats(
     states: list[str],
     target: str,
@@ -883,13 +871,25 @@ def _calibrated_gaze_states(
     ncal = min(len(visible_head), max(3, int(cfg.gaze_calibration_samples)))
     if ncal:
         # Stability-aware calibration: central, low-motion samples define camera bias.
-        early = visible_head[: max(ncal * 4, ncal)]
+        #
+        # The search window used to be only the first `ncal * 4` visible samples -
+        # about the first 20 seconds at the default 2 fps. What is being estimated
+        # here is the camera's fixed mounting offset, which does not change during
+        # the recording, and this is an offline analyzer that already holds the
+        # whole track. Restricting the estimate to the opening seconds threw away
+        # most of the evidence and made it depend on how the presenter happened to
+        # start: someone who spends the first 18 seconds turned towards a slide
+        # had that turn absorbed into the baseline, after which the look-away was
+        # normalised to "centred" and never reported at all.
+        search = visible_head if cfg.gaze_calibration_use_full_session else (
+            visible_head[: max(ncal * 4, ncal)]
+        )
         candidates: list[tuple[float, tuple[float, float]]] = []
-        for i, sample in enumerate(early):
+        for i, sample in enumerate(search):
             yaw_i, pitch_i = float(sample[0]), float(sample[1])
             motion = 0.0
             if i > 0:
-                py, pp = early[i - 1]
+                py, pp = search[i - 1]
                 motion = math.hypot(yaw_i - float(py), pitch_i - float(pp))
             centrality = abs(yaw_i) / 35.0 + abs(pitch_i) / 30.0
             stability_cost = min(motion / 12.0, 3.0)
@@ -909,6 +909,11 @@ def _calibrated_gaze_states(
     states: list[str] = []
     soft_scores: list[float] = []
     deltas: list[tuple[float,float] | None] = []
+    # Previous orientation band, for hysteresis. A held frame keeps it (the
+    # presenter has not been re-observed, so the state should not change); a
+    # genuine away resets it, because re-entering frame is a fresh observation.
+    previous_band: str | None = None
+    margin = max(0.0, float(cfg.orientation_hysteresis_points))
     for item, hint in zip(samples, hints):
         # Preserve frame-level soft-decay semantics. A held sample is not allowed
         # to be reclassified as engaged/slight/off-axis from the stale coordinates.
@@ -921,11 +926,13 @@ def _calibrated_gaze_states(
             away += 1
             states.append("away")
             deltas.append(None)
+            previous_band = None
             continue
         if item is None:
             away += 1
             states.append("away")
             deltas.append(None)
+            previous_band = None
             continue
         yaw, pitch = item
         dy = float(yaw) - by
@@ -940,19 +947,42 @@ def _calibrated_gaze_states(
         deltas.append((compensated_dy, compensated_dp))
         score = _orientation_score(compensated_dy, compensated_dp)
         soft_scores.append(score)
-        if score >= 88:
+        if score >= cfg.orientation_direct_score:
             direct += 1
-        if score >= 72:
+
+        # Schmitt trigger on the band boundaries. Without it, a presenter whose
+        # orientation sits near a threshold flickers between bands frame by
+        # frame, which splits a single continuous look-away into a string of
+        # short ones. That inflates the reported episode count and can even trip
+        # the "repeated short glances" rule from what was actually one long
+        # glance. Leaving a band now costs `margin` more score points than
+        # entering it did.
+        engaged_threshold = cfg.orientation_engaged_score
+        slight_threshold = cfg.orientation_slight_score
+        if previous_band == "engaged":
+            engaged_threshold -= margin
+            slight_threshold -= margin
+        elif previous_band == "off_axis":
+            engaged_threshold += margin
+            slight_threshold += margin
+
+        if score >= engaged_threshold:
+            band = "engaged"
+        elif score >= slight_threshold:
+            band = "slight_off"
+        else:
+            band = "off_axis"
+        previous_band = band
+
+        if band == "engaged":
             forward += 1
-            states.append("engaged")
-        elif score >= 62:
+        elif band == "slight_off":
             looking += 1
             slight += 1
-            states.append("slight_off")
         else:
             looking += 1
             off_axis += 1
-            states.append("off_axis")
+        states.append(band)
     return {
         "baseline_yaw": by, "baseline_pitch": bp,
         "forward": forward, "looking": looking, "away": away, "direct": direct,
@@ -993,12 +1023,22 @@ def analyze_video(
     pose=PoseTracker(Path(pose_model_dir),pose_device,cfg.pose_confidence,cfg.pose_imgsz)
     posture_cal = PostureCalibrator(cfg)
 
+    cv2 = _cv2()
     cap=cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {video_path}")
-    source_fps=float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
-    total_src=int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    duration=total_src/source_fps if total_src>0 else 0.0
+    source_fps=_safe_float(cap.get(cv2.CAP_PROP_FPS), 0.0)
+    if not (1.0 <= source_fps <= 240.0):
+        # Live-recorded MediaRecorder WebM - the browser format this endpoint
+        # actually receives - frequently reports 0 or a nonsense frame rate.
+        source_fps = 30.0
+    total_src=int(_safe_float(cap.get(cv2.CAP_PROP_FRAME_COUNT), 0.0))
+    # Container duration, when the container has one. A browser WebM written by
+    # MediaRecorder usually has no frame count or duration header, so this stays
+    # 0.0 here and is replaced after the decode loop by the measured timeline.
+    # Leaving it at 0.0 used to reach the UI as "0 s" and, worse, collapsed the
+    # duration term of score_confidence to zero for every browser recording.
+    container_duration=total_src/source_fps if total_src>0 else 0.0
     step=max(1,int(round(source_fps/max(cfg.sample_fps,.1))))
 
     sampled=forward=looking=away=direct=0
@@ -1020,17 +1060,44 @@ def analyze_video(
     gesture_tracker=GestureTracker(cfg)
     kp_visible={name:0 for name in ("left_shoulder","right_shoulder","left_hip","right_hip","left_elbow","right_elbow","left_wrist","right_wrist")}
     idx=0
+    advanced_frames=0
+    last_frame_msec=0.0
+    # Per-stage wall clock. Without this split the only way to answer "what is
+    # slow?" is to guess; for a multi-minute clip at 2 fps sampling the answer
+    # is usually container decode, not model inference.
+    stage_seconds = {"decode": 0.0, "face": 0.0, "head_pose": 0.0, "gaze": 0.0, "pose": 0.0}
     inf_start=time.perf_counter()
     while True:
+        if idx % step != 0:
+            # Skipped frames are advanced with grab(), which demuxes without
+            # running the full decode+colour-convert that read() performs. At
+            # the default 2 fps sampling of 30 fps video this avoids decoding
+            # 14 of every 15 frames, and decode - not inference - dominates the
+            # wall clock for a several-minute recording.
+            _t0 = time.perf_counter()
+            grabbed = cap.grab()
+            stage_seconds["decode"] += time.perf_counter() - _t0
+            if not grabbed:
+                break
+            idx += 1
+            advanced_frames += 1
+            continue
+        _t0 = time.perf_counter()
         ok,frame=cap.read()
+        stage_seconds["decode"] += time.perf_counter() - _t0
         if not ok:
             break
-        if idx%step!=0:
-            idx+=1
-            continue
+        advanced_frames += 1
+        # Presentation timestamp of the frame just read. This is the only
+        # duration source that works for browser WebM without a duration header.
+        position_msec = _safe_float(cap.get(cv2.CAP_PROP_POS_MSEC), 0.0)
+        if position_msec > last_frame_msec:
+            last_frame_msec = position_msec
         sampled+=1
         posture_timeline.append(None)
+        _t0 = time.perf_counter()
         faces=head.detect_faces(frame,cfg.face_confidence)
+        stage_seconds["face"] += time.perf_counter() - _t0
         face_counts.append(len(faces))
         current_roll=0.0
         current_forward=False
@@ -1051,12 +1118,21 @@ def analyze_video(
         else:
             face_missing_run = 0
             face=max(faces,key=lambda f:(f[2]-f[0])*(f[3]-f[1]))
+            _t0 = time.perf_counter()
             yaw,pitch,roll=head.head_pose(frame,face)
+            stage_seconds["head_pose"] += time.perf_counter() - _t0
             current_roll=roll
             yaws.append(yaw); pitches.append(pitch); rolls.append(roll)
             head_pose_samples.append((float(yaw), float(pitch)))
-            gaze_limit = max(float(cfg.gaze_head_disagreement_limit_deg), 45.0)
-            gaze_result=head.gaze_angles(frame,face,(yaw,pitch,roll), gaze_limit)
+            # The configured limit is the limit. The previous max(..., 45.0)
+            # floor meant the config value could only ever be raised, never
+            # lowered, so calibrating it below 45 degrees silently did nothing.
+            _t0 = time.perf_counter()
+            gaze_result=head.gaze_angles(
+                frame, face, (yaw, pitch, roll),
+                float(cfg.gaze_head_disagreement_limit_deg),
+            )
+            stage_seconds["gaze"] += time.perf_counter() - _t0
             if gaze_result is not None:
                 gy,gp,grel=gaze_result
                 # Only trust gaze when the eye crops are large enough. Blend a small
@@ -1083,7 +1159,9 @@ def analyze_video(
         pose_backed_flags.append(False)
         if sampled%max(1,cfg.pose_every_n_samples)==0:
             pose_attempts += 1
+            _t0 = time.perf_counter()
             p=pose.infer(frame)
+            stage_seconds["pose"] += time.perf_counter() - _t0
             if p is not None:
                 if not faces:
                     # Face detector can miss a frame while the person/body tracker
@@ -1125,6 +1203,34 @@ def analyze_video(
     if sampled==0:
         raise RuntimeError("Video contained no readable frames")
 
+    # Resolve the clip duration from the best evidence available, in order of
+    # trust. A browser recording normally has neither a frame count nor usable
+    # timestamps, so the decoded-frame count is the fallback that always works.
+    advanced_duration = advanced_frames / source_fps if advanced_frames > 0 else 0.0
+    timestamp_duration = last_frame_msec / 1000.0
+    if container_duration > 0.0:
+        duration = container_duration
+        duration_source = "container_frame_count"
+    elif timestamp_duration > 0.0:
+        duration = timestamp_duration
+        duration_source = "frame_timestamps"
+    else:
+        duration = advanced_duration
+        duration_source = "advanced_frame_count"
+    if duration <= 0.0:
+        duration = sampled / max(_safe_float(cfg.sample_fps, 0.1), 0.1)
+        duration_source = "sample_count_estimate"
+
+    # Every "sustained for N seconds" rule below converts seconds into a frame
+    # count. Using the *configured* sample_fps assumed the decoder delivered
+    # exactly that rate; when the container reports the wrong frame rate - which
+    # browser WebM routinely does - every temporal threshold was scaled by the
+    # same error, so a 2.5 s look-away rule could fire at 1.25 s or 5 s. Measure
+    # the rate that was actually achieved instead.
+    effective_sample_fps = float(
+        np.clip(sampled / duration if duration > 0 else cfg.sample_fps, 0.2, 60.0)
+    )
+
     # A missed face is not equivalent to an absent presenter when pose confirms a
     # person/body. Reuse the last reliable orientation for those samples before the
     # final gaze aggregation. This keeps presence/attention distributions consistent.
@@ -1134,7 +1240,7 @@ def analyze_video(
             orientation_states[i] = "held"
     # If a face was missing for a short run without pose confirmation, preserve the
     # last orientation inside the configured grace window.
-    grace_frames = max(1, int(round(cfg.away_grace_seconds * cfg.sample_fps)))
+    grace_frames = max(1, int(round(cfg.away_grace_seconds * effective_sample_fps)))
     recent_none = 0
     for i in range(len(orientation_samples)):
         if orientation_samples[i] is None:
@@ -1159,7 +1265,7 @@ def analyze_video(
     posture_scores=[]; posture_details=[]
     posture_scored_timeline: list[float | None] = []
     last_posture_score: float | None = None
-    max_hold_frames = max(1, int(math.ceil(3.0 * max(_safe_float(cfg.sample_fps, 0.1), 0.1))))
+    max_hold_frames = max(1, int(math.ceil(cfg.posture_hold_max_seconds * effective_sample_fps)))
     hold_remaining = 0
 
     for item in posture_timeline:
@@ -1217,13 +1323,16 @@ def analyze_video(
     vf_pct=100*forward/visible if visible else 0.0
 
     gaze_violation = _temporal_violation_stats(
-        orientation_states, "off_axis", cfg.sample_fps,
-        sustain_seconds=2.5, repeat_window_seconds=10.0, repeat_count=3,
+        orientation_states, "off_axis", effective_sample_fps,
+        sustain_seconds=cfg.gaze_sustain_seconds,
+        repeat_window_seconds=cfg.gaze_repeat_window_seconds,
+        repeat_count=cfg.gaze_repeat_count,
     )
     away_violation = _temporal_violation_stats(
-        orientation_states, "away", cfg.sample_fps,
+        orientation_states, "away", effective_sample_fps,
         sustain_seconds=max(1.0, _safe_float(cfg.away_grace_seconds, 0.9)),
-        repeat_window_seconds=10.0, repeat_count=3,
+        repeat_window_seconds=cfg.away_repeat_window_seconds,
+        repeat_count=cfg.away_repeat_count,
     )
     sustained_look_s = float(gaze_violation["effective_seconds"])
     look_episodes = int(gaze_violation["sustained_episode_count"] + gaze_violation["repeat_window_episode_count"])
@@ -1232,7 +1341,7 @@ def analyze_video(
     away_episodes = int(away_violation["sustained_episode_count"] + away_violation["repeat_window_episode_count"])
     sustained_away_pct = float(away_violation["effective_percent"])
     sustained_look_pct_visible = 100.0 * sustained_look_s / max(
-        visible / max(_safe_float(cfg.sample_fps, 0.1), .1), 1e-6
+        visible / effective_sample_fps, 1e-6
     )
 
     baseline_yaw = float(gaze["baseline_yaw"])
@@ -1245,10 +1354,16 @@ def analyze_video(
         hy, hp = item
         rel_yaw = abs(_safe_float(hy) - baseline_yaw)
         rel_pitch = abs(_safe_float(hp) - baseline_pitch)
-        head_turn_states.append("turn" if rel_yaw >= 32.0 or rel_pitch >= 25.0 else "neutral")
+        head_turn_states.append(
+            "turn"
+            if rel_yaw >= cfg.head_turn_yaw_deg or rel_pitch >= cfg.head_turn_pitch_deg
+            else "neutral"
+        )
     head_turn_violation = _temporal_violation_stats(
-        head_turn_states, "turn", cfg.sample_fps,
-        sustain_seconds=3.5, repeat_window_seconds=10.0, repeat_count=3,
+        head_turn_states, "turn", effective_sample_fps,
+        sustain_seconds=cfg.head_turn_sustain_seconds,
+        repeat_window_seconds=cfg.head_turn_repeat_window_seconds,
+        repeat_count=cfg.head_turn_repeat_count,
     )
 
 
@@ -1303,16 +1418,18 @@ def analyze_video(
     reliability = len(posture_scores)/max(1,pose_attempts)
     mean_pose_quality = safe_mean(pose_quality_values)
     posture_raw=_robust_posture_score(posture_scores)
-    posture_good_pct=100*sum(x>=75 for x in posture_scores)/max(1,len(posture_scores))
-    posture_bad_pct=100*sum(x<55 for x in posture_scores)/max(1,len(posture_scores))
+    posture_good_pct=100*sum(x>=cfg.posture_good_score_threshold for x in posture_scores)/max(1,len(posture_scores))
+    posture_bad_pct=100*sum(x<cfg.posture_bad_score_threshold for x in posture_scores)/max(1,len(posture_scores))
 
     posture_violation_states = [
-        "bad" if (x is not None and x < 65.0) else "neutral"
+        "bad" if (x is not None and x < cfg.posture_violation_score_threshold) else "neutral"
         for x in posture_scored_timeline
     ]
     posture_violation = _temporal_violation_stats(
-        posture_violation_states, "bad", cfg.sample_fps,
-        sustain_seconds=4.0, repeat_window_seconds=10.0, repeat_count=3,
+        posture_violation_states, "bad", effective_sample_fps,
+        sustain_seconds=cfg.posture_violation_sustain_seconds,
+        repeat_window_seconds=cfg.posture_violation_repeat_window_seconds,
+        repeat_count=cfg.posture_violation_repeat_count,
     )
     # Consistency matters: a few excellent frames should not produce a 95 posture
     # score when a substantial part of the talk is only average. Detection/calibration
@@ -1358,7 +1475,6 @@ def analyze_video(
     gesture_summary = gesture_tracker.summary(pose_attempts)
     hand_pct = float(gesture_summary["visible_percent"])
     gesture_pct = float(gesture_summary["active_percent_visible"])
-    gesture = _gesture_score(gesture_pct, hand_pct)
 
     # v3's reliability gate was too strict for real laptop webcams. v4 requires
     # only a few calibrated frames and reports confidence separately.
@@ -1374,9 +1490,9 @@ def analyze_video(
 
     # v8 overall avoids counting presence/engagement twice: camera_attention already
     # contains both. Gesture remains informational and never changes the grade.
-    components=[(camera_attention,.60),(head_stability,.15)]
+    components=[(camera_attention,cfg.attention_weight),(head_stability,cfg.head_stability_weight)]
     if posture_is_reliable:
-        components.append((posture,.25))
+        components.append((posture,cfg.posture_weight))
     total_w=sum(w for _,w in components)
     overall=clamp(sum(v*w for v,w in components)/max(total_w,1e-6))
     # Confidence is evidence quality, not a bonus score. v5 effectively started at
@@ -1416,8 +1532,11 @@ def analyze_video(
 
     metrics={
         "duration_seconds":round(duration,3),
+        "duration_source":duration_source,
         "source_fps":round(source_fps,3),
         "sample_fps_target":cfg.sample_fps,
+        "sample_fps_effective":round(effective_sample_fps,3),
+        "source_frames_advanced":advanced_frames,
         "sampled_frames":sampled,
         "forward_frames":forward,
         "looking_away_frames":off_axis,
@@ -1444,12 +1563,12 @@ def analyze_video(
         "sustained_looking_away_seconds":round(sustained_look_s,2),
         "sustained_looking_away_percent_visible":round(sustained_look_pct_visible,2),
         "looking_away_episode_count":look_episodes,
-        "gaze_buffer_threshold_seconds":2.5,
-        "gaze_repeat_window_seconds":10.0,
+        "gaze_buffer_threshold_seconds":cfg.gaze_sustain_seconds,
+        "gaze_repeat_window_seconds":cfg.gaze_repeat_window_seconds,
         "gaze_repeat_triggered":bool(gaze_violation["repeat_triggered"]),
         "gaze_repeat_episode_count":int(gaze_violation["repeat_window_episode_count"]),
         "gaze_accumulated_violation_percent":round(float(gaze_violation["effective_percent"]),2),
-        "head_turn_buffer_threshold_seconds":3.5,
+        "head_turn_buffer_threshold_seconds":cfg.head_turn_sustain_seconds,
         "head_turn_repeat_triggered":bool(head_turn_violation["repeat_triggered"]),
         "head_turn_accumulated_violation_percent":round(float(head_turn_violation["effective_percent"]),2),
         "sustained_away_seconds":round(sustained_away_s,2),
@@ -1481,8 +1600,8 @@ def analyze_video(
         "posture_calibration_samples":len(posture_cal.samples),
         "posture_good_percent":round(posture_good_pct,2),
         "posture_bad_percent":round(posture_bad_pct,2),
-        "posture_hold_max_seconds":3.0,
-        "posture_violation_threshold_seconds":4.0,
+        "posture_hold_max_seconds":cfg.posture_hold_max_seconds,
+        "posture_violation_threshold_seconds":cfg.posture_violation_sustain_seconds,
         "posture_accumulated_violation_percent":round(float(posture_violation["effective_percent"]),2),
         "posture_repeat_triggered":bool(posture_violation["repeat_triggered"]),
         "posture_components":posture_component_means,
@@ -1549,7 +1668,8 @@ def analyze_video(
     elif gesture_summary["level"] == "FREQUENT MOVEMENT":
         feedback.append("Frequent hand/arm movement was detected; review whether it supports your key points rather than distracts.")
 
-    effective=duration if duration>0 else sampled/max(cfg.sample_fps,.1)
+    # duration is already resolved against the best available evidence above.
+    effective=duration
     return {
         "vision_score":round(overall,1),
         "metrics":metrics,
@@ -1559,6 +1679,13 @@ def analyze_video(
             "vision_inference_seconds":round(inf_seconds,3),
             "total_vision_analysis_seconds":round(total,3),
             "video_realtime_factor_x":round(effective/max(total,1e-6),2),
+            "stage_seconds":{k: round(v, 3) for k, v in stage_seconds.items()},
+            "stage_percent_of_loop":{
+                k: round(100.0 * v / max(inf_seconds, 1e-6), 1) for k, v in stage_seconds.items()
+            },
+            "source_frames_advanced":advanced_frames,
+            "frames_fully_decoded":sampled,
+            "frames_skipped_without_decode":max(0, advanced_frames - sampled),
             "vision_requested_device":device,
             "face_used_device":head.face_device,
             "head_pose_used_device":head.head_device,

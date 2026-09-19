@@ -62,9 +62,39 @@ class Issue(StrictModel):
     problem: str = Field(min_length=1)
     suggestion: str = Field(min_length=1)
 
+class DimensionEvidence(StrictModel):
+    """Why one dimension received the score it did.
+
+    Optional throughout. The seven scores stay the contract; this is
+    supplementary justification, and a model that omits it must not turn a
+    usable evaluation into a failure and a second paid retry.
+    """
+
+    evidence: list[str] = Field(default_factory=list, max_length=3)
+    reasoning: str = ""
+    confidence: Literal["high", "medium", "low", "insufficient_evidence"] | None = None
+
+
+class ReferenceCheck(StrictModel):
+    """Explicit transcript-versus-reference comparison.
+
+    ``unsupported_by_reference`` is claims the transcript makes that the
+    reference neither confirms nor denies - useful to the presenter, and not the
+    same thing as being wrong.
+    """
+
+    reference_available: bool = False
+    supported_claims: list[str] = Field(default_factory=list, max_length=5)
+    missing_from_transcript: list[str] = Field(default_factory=list, max_length=5)
+    contradicted_by_reference: list[str] = Field(default_factory=list, max_length=5)
+    unsupported_by_reference: list[str] = Field(default_factory=list, max_length=5)
+
+
 class CompactEvaluation(StrictModel):
     scores: Scores
     issues: list[Issue] = Field(default_factory=list, max_length=12)
     top_priorities: list[str] = Field(min_length=1, max_length=5)
     overall_feedback: str = Field(min_length=1)
     revision_guidance: str = Field(min_length=1)
+    dimension_evidence: dict[Category, DimensionEvidence] | None = None
+    reference_check: ReferenceCheck | None = None

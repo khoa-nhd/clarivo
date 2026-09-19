@@ -49,6 +49,25 @@ class AnalysisMeta(BaseModel):
     provider: str
     model: str
     prompt_version: str | None = None
+    cached: bool = False
+
+
+class DimensionEvidence(BaseModel):
+    """Transcript spans and confidence behind one dimension's score."""
+
+    evidence: list[str] = Field(default_factory=list, max_length=3)
+    reasoning: str = ""
+    confidence: Literal["high", "medium", "low", "insufficient_evidence"] | None = None
+
+
+class ReferenceCheck(BaseModel):
+    """What the transcript did and did not carry over from the reference."""
+
+    reference_available: bool = False
+    supported_claims: list[str] = Field(default_factory=list, max_length=5)
+    missing_from_transcript: list[str] = Field(default_factory=list, max_length=5)
+    contradicted_by_reference: list[str] = Field(default_factory=list, max_length=5)
+    unsupported_by_reference: list[str] = Field(default_factory=list, max_length=5)
 
 
 class AnalysisResult(BaseModel):
@@ -57,6 +76,10 @@ class AnalysisResult(BaseModel):
     top_priorities: list[str] = Field(min_length=1, max_length=5)
     feedback: str
     revision_guidance: str | None = None
+    # Optional: present when the model supplied justification. Additive, so an
+    # older client that ignores these fields keeps working unchanged.
+    dimension_evidence: dict[str, DimensionEvidence] | None = None
+    reference_check: ReferenceCheck | None = None
     meta: AnalysisMeta | None = None
 
     @field_validator("top_priorities", mode="before")

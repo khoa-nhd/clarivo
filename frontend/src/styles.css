@@ -264,6 +264,15 @@ input:focus, select:focus, textarea:focus { border-color: #9a8df3; background: #
   .queue-delete-button { opacity: 1; }
 }
 
+/* Live recording vs video upload tab switcher */
+.media-mode-tabs { margin-top: 18px; display: inline-flex; gap: 4px; padding: 4px; border-radius: 12px; background: #f0eefb; border: 1px solid #dedaf8; }
+.media-mode-tab { border: none; background: transparent; color: #6f7180; font-size: 11px; font-weight: 700; padding: 8px 16px; border-radius: 9px; cursor: pointer; transition: .15s ease; }
+.media-mode-tab:hover:not(:disabled) { color: #4b3fb0; }
+.media-mode-tab.active { background: #fff; color: #4b3fb0; box-shadow: 0 1px 3px rgba(108,92,231,.18); }
+.media-mode-tab:disabled { opacity: .5; cursor: not-allowed; }
+.upload-recorder .camera-placeholder { position: absolute; inset: 0; display: grid; place-items: center; color: #7b7e8c; font-size: 11px; }
+.upload-recorder .camera-preview { transform: none; object-fit: contain; background: #000; }
+
 /* New-session microphone -> editable transcript flow */
 .voice-recorder {
   margin-top: 18px;
@@ -1009,3 +1018,68 @@ button,
   .tutorial-banner { width: calc(100% - 24px); }
   .tutorial-banner-head h2 { font-size: 16px; }
 }
+
+/* Per-dimension score evidence (optional; only rendered when the evaluator
+   returned justification for that score). Uses the existing palette tokens so
+   the report keeps one visual language. */
+.score-label-button {
+  width: 100%;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  align-items: center;
+}
+.score-label-button:hover span, .score-label-button:focus-visible span { color: var(--accent); }
+.score-label-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+.score-label-button > span { display: inline-flex; align-items: center; gap: 6px; }
+
+.evidence-dot { width: 6px; height: 6px; border-radius: 999px; background: var(--muted); }
+.evidence-dot.evidence-high { background: var(--green); }
+.evidence-dot.evidence-medium { background: var(--accent); }
+.evidence-dot.evidence-low { background: var(--amber); }
+.evidence-dot.evidence-insufficient_evidence { background: var(--red); }
+
+.evidence-hint { margin: -6px 0 0; font-size: 11px; }
+
+.score-evidence {
+  margin-top: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--soft);
+}
+.evidence-confidence {
+  display: inline-flex;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.evidence-confidence.evidence-high { background: var(--green-soft); color: var(--green); }
+.evidence-confidence.evidence-low { background: var(--amber-soft); color: var(--amber); }
+.evidence-confidence.evidence-insufficient_evidence { background: var(--red-soft); color: var(--red); }
+.evidence-reasoning { margin: 8px 0 0; font-size: 12px; color: var(--ink); }
+.evidence-quotes { margin: 8px 0 0; padding-left: 16px; display: grid; gap: 4px; }
+.evidence-quotes li { font-size: 12px; color: var(--muted); font-style: italic; }
+
+/* Transcript-versus-reference comparison. */
+.reference-groups { display: grid; gap: 14px; margin-top: 4px; }
+.reference-group { border-left: 3px solid var(--line); padding-left: 12px; }
+.reference-group small {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.reference-group ul { margin: 6px 0 0; padding-left: 16px; display: grid; gap: 4px; }
+.reference-group li { font-size: 13px; color: var(--ink); }
+.reference-group.reference-good { border-left-color: var(--green); }
+.reference-group.reference-warn { border-left-color: var(--amber); }
+.reference-group.reference-bad { border-left-color: var(--red); }

@@ -1,12 +1,45 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
-from typing import Any
-import openvino as ov
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    import openvino as ov
+
+
+def _ov():
+    """Import the OpenVINO runtime lazily.
+
+    The audio pipeline's DSP stage (VAD, pause/pace/filler metrics) is pure
+    NumPy/librosa and is the only stage the production web route runs, because
+    the transcript comes from Cloudflare Whisper.  Importing ``openvino`` at
+    module scope made that stage - and every test or benchmark touching it -
+    hard-depend on a runtime it never calls.  Import on first real use instead.
+    """
+    import openvino as ov
+
+    return ov
+
+
+@lru_cache(maxsize=1)
+def _available_devices_cached() -> tuple[str, ...]:
+    try:
+        return tuple(_ov().Core().available_devices)
+    except Exception:
+        # No OpenVINO runtime, or no enumerable device. Callers treat an empty
+        # list as "only CPU is assumable", which is the correct degradation.
+        return ()
 
 
 def available_devices() -> list[str]:
-    return list(ov.Core().available_devices)
+    """Available OpenVINO devices.
+
+    Cached: ``fallback_chain`` is called once per model compile and once per
+    ASR/pose retry, and every call previously constructed a fresh ``ov.Core``
+    just to enumerate a device list that cannot change inside one process.
+    """
+    return list(_available_devices_cached())
 
 
 def has_device(devices: list[str], prefix: str) -> bool:
@@ -51,8 +84,8 @@ def fallback_chain(requested: str, *, include_auto: bool = False) -> list[str]:
     return out
 
 
-def create_core(cache_dir: Path | None = None) -> ov.Core:
-    core = ov.Core()
+def create_core(cache_dir: Path | None = None) -> "ov.Core":
+    core = _ov().Core()
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -63,7 +96,7 @@ def create_core(cache_dir: Path | None = None) -> ov.Core:
 
 
 def device_info() -> list[dict[str, Any]]:
-    core = ov.Core()
+    core = _ov().Core()
     rows = []
     for d in core.available_devices:
         try:

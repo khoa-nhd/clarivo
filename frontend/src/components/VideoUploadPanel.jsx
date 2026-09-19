@@ -1,0 +1,206 @@
+import { useEffect, useRef, useState } from 'react'
+import { transcribeAudio } from '../services/api.js'
+import { compressedAudioToWav } from '../services/audioProcessing.js'
+
+const MAX_RECORDING_SECONDS = 5 * 60
+const MAX_UPLOAD_VIDEO_BYTES = 80 * 1024 * 1024 // mirrors backend LOCAL_MAX_VIDEO_BYTES
+const ACCEPTED_EXTENSIONS = /\.(mp4|webm|mov|m4v)$/i
+
+function formatDuration(totalSeconds) {
+  const safe = Math.max(0, Math.floor(totalSeconds || 0))
+  const minutes = Math.floor(safe / 60).toString().padStart(2, '0')
+  const seconds = (safe % 60).toString().padStart(2, '0')
+  return `${minutes}:${seconds}`
+}
+
+function formatBytes(bytes) {
+  if (!bytes) return '0 MB'
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function readVideoDuration(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file)
+    const probe = document.createElement('video')
+    probe.preload = 'metadata'
+    probe.onloadedmetadata = () => {
+      const duration = probe.duration
+      URL.revokeObjectURL(url)
+      resolve(Number.isFinite(duration) && duration > 0 ? duration : 0)
+    }
+    probe.onerror = () => {
+      URL.revokeObjectURL(url)
+      reject(new Error('Could not read this video file. Try an mp4, webm, or mov file.'))
+    }
+    probe.src = url
+  })
+}
+
+export default function VideoUploadPanel({
+  topic,
+  setTranscript,
+  onTranscribingChange,
+  onMediaReady,
+  resetKey,
+  visionEnabled = true,
+}) {
+  const inputRef = useRef(null)
+  const previewUrlRef = useRef('')
+
+  const [processing, setProcessing] = useState(false)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const [fileName, setFileName] = useState('')
+  const [fileSize, setFileSize] = useState(0)
+  const [duration, setDuration] = useState(0)
+  const [previewUrl, setPreviewUrl] = useState('')
+
+  useEffect(() => { onTranscribingChange?.(processing) }, [processing, onTranscribingChange])
+
+  useEffect(() => {
+    if (resetKey === undefined) return
+    resetPanel()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resetKey])
+
+  useEffect(() => () => {
+    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current)
+  }, [])
+
+  function resetPanel() {
+    setProcessing(false)
+    setError('')
+    setNotice('')
+    setFileName('')
+    setFileSize(0)
+    setDuration(0)
+    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current)
+    previewUrlRef.current = ''
+    setPreviewUrl('')
+    if (inputRef.current) inputRef.current.value = ''
+  }
+
+  async function handleFile(file) {
+    setError('')
+    setNotice('')
+    onMediaReady?.(null)
+    if (!file) return
+
+    const looksLikeVideo = file.type.startsWith('video/') || ACCEPTED_EXTENSIONS.test(file.name)
+    if (!looksLikeVideo) {
+      setError('Please choose a video file (mp4, webm, or mov).')
+      return
+    }
+    if (file.size > MAX_UPLOAD_VIDEO_BYTES) {
+      setError(`This file is ${formatBytes(file.size)}, over the ${formatBytes(MAX_UPLOAD_VIDEO_BYTES)} limit.`)
+      return
+    }
+
+    setProcessing(true)
+    setNotice('Reading video…')
+    try {
+      const rawDuration = await readVideoDuration(file)
+      const durationSeconds = Math.max(1, Math.round(rawDuration))
+      if (durationSeconds > MAX_RECORDING_SECONDS) {
+        throw new Error(`This video is longer than ${Math.round(MAX_RECORDING_SECONDS / 60)} minutes. Please upload a shorter clip.`)
+      }
+
+      setNotice('Extracting audio…')
+      const wavBlob = await compressedAudioToWav(file, 16000)
+
+      setNotice('Creating transcript…')
+      const transcription = await transcribeAudio(wavBlob, { durationSeconds, topic })
+      setTranscript(transcription.text || '')
+
+      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current)
+      const url = URL.createObjectURL(file)
+      previewUrlRef.current = url
+      setPreviewUrl(url)
+      setFileName(file.name)
+      setFileSize(file.size)
+      setDuration(durationSeconds)
+      setNotice('Transcript ready. Review it before analysis.')
+
+      onMediaReady?.({
+        audioBlob: wavBlob,
+        videoBlob: file,
+        durationSeconds,
+        audioMimeType: wavBlob.type || 'audio/wav',
+        videoMimeType: file.type || 'video/mp4',
+        audioSizeBytes: wavBlob.size,
+        videoSizeBytes: file.size,
+        transcriptionModel: transcription.model,
+        transcriptionWordCount: transcription.word_count,
+        rawTranscript: transcription.text || '',
+        language: 'en',
+      })
+    } catch (processingError) {
+      setNotice('')
+      setError(processingError?.message || 'Could not process this video file.')
+    } finally {
+      setProcessing(false)
+    }
+  }
+
+  function onInputChange(event) {
+    const file = event.target.files?.[0] || null
+    handleFile(file)
+  }
+
+  return (
+    <section className={`voice-recorder media-recorder upload-recorder ${processing ? 'transcribing' : ''}`}>
+      <div className="media-recorder-grid">
+        <div className="camera-preview-shell">
+          {previewUrl ? (
+            <video className="camera-preview" src={previewUrl} controls preload="metadata" />
+          ) : (
+            <div className="camera-placeholder">No file selected</div>
+          )}
+          <span className="camera-label">Uploaded video</span>
+        </div>
+
+        <div className="media-recorder-copy">
+          <div className="voice-recorder-top">
+            <div>
+              <div className="eyebrow">Presentation upload</div>
+              <h3>{processing ? 'Preparing transcript…' : 'Upload a recorded video'}</h3>
+              {!visionEnabled && (
+                <p>This backend doesn't run local visual/voice delivery analysis; content feedback will still run on your uploaded video.</p>
+              )}
+            </div>
+            {duration > 0 && <div className="recording-clock">{formatDuration(duration)}</div>}
+          </div>
+
+          <div className="voice-recorder-controls">
+            <div />
+            <input
+              ref={inputRef}
+              type="file"
+              accept="video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov,.m4v"
+              onChange={onInputChange}
+              disabled={processing}
+              style={{ display: 'none' }}
+            />
+            <button
+              type="button"
+              className="record-button"
+              onClick={() => inputRef.current?.click()}
+              disabled={processing}
+            >
+              {fileName ? 'Choose a different file' : 'Choose a video file'}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {processing && <div className="transcribing-status"><span className="mini-spinner" /><div><strong>{notice || 'Processing…'}</strong></div></div>}
+      {notice && !processing && <div className="speech-success">{notice}</div>}
+      {error && <div className="speech-error"><span>{error}</span></div>}
+      {fileName && !processing && (
+        <div className="recording-review">
+          <div><strong>{fileName}</strong><span>{formatDuration(duration)} · {formatBytes(fileSize)}</span></div>
+        </div>
+      )}
+    </section>
+  )
+}

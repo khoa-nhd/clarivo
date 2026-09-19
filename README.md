@@ -6,10 +6,42 @@ Clarivo now supports the complete practice loop:
 
 The existing seven-criterion Main Evaluator remains unchanged. The new drill system is a separate layer above it.
 
-## Quick start
-Read:
+## Quick start (Windows)
+
+Double-click **`start.bat`** in the project root. It sets everything up on the
+first run and launches the app on every run:
+
+1. creates `backend\.venv` if missing
+2. installs the backend packages if missing
+3. creates `backend\.env` from `.env.example` if missing
+4. runs `npm install` if `frontend/node_modules` is missing
+5. starts the backend (port 8000) and frontend (port 5173) in two windows
+6. waits for both, then opens <http://localhost:5173>
+
+The first run takes a few minutes; later runs take a few seconds. To stop the
+project, close the two server windows.
+
+It starts in **mock AI mode**, so it works with no API key and costs no quota.
+To use the real AI, open `backend\.env` and set:
+
+```
+AI_PROVIDER=cloudflare
+TRANSCRIPTION_PROVIDER=cloudflare
+CLOUDFLARE_ACCOUNT_ID=your-account-id
+CLOUDFLARE_AUTH_TOKEN=your-workers-ai-token
+```
+
+then run `start.bat` again.
+
+Local OpenVINO voice/visual analysis is a separate, much larger install
+(OpenVINO + Ultralytics + model weights). Set it up once with
+`backend\setup_local_scoring.bat`, then set `LOCAL_SCORING_ENABLED=true` in
+`backend\.env`.
+
+Other docs:
 - `RUN_LEARNING_LOOP_WINDOWS.md` — exact Windows commands
 - `LEARNING_LOOP_IMPLEMENTATION.md` — feature and architecture map
+- `backend/BENCHMARKS.md` — how to reproduce every accuracy/performance number
 
 ## Frontend starter library
 Edit `frontend/src/data/topicLibrary.js` to add or change prepared topics.

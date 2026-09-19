@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import TopicLibraryPicker from './TopicLibraryPicker.jsx'
 import VoiceTranscriptRecorder from './VoiceTranscriptRecorder.jsx'
+import VideoUploadPanel from './VideoUploadPanel.jsx'
 import { topicLibrary } from '../data/topicLibrary.js'
 import { refreshTopicLibrary } from '../services/api.js'
 
@@ -15,7 +16,7 @@ function loadTopicLibrary() {
   return topicLibrary
 }
 
-export default function NewSessionForm({ onSubmit, queueCount }) {
+export default function NewSessionForm({ onSubmit, queueCount, visionEnabled = true }) {
   const [selectedProfile, setSelectedProfile] = useState(null)
   const [topic, setTopic] = useState('')
   const [targetAudience, setTargetAudience] = useState('Beginner')
@@ -26,6 +27,7 @@ export default function NewSessionForm({ onSubmit, queueCount }) {
   const [isTranscribing, setIsTranscribing] = useState(false)
   const [mediaDraft, setMediaDraft] = useState(null)
   const [recorderResetKey, setRecorderResetKey] = useState(0)
+  const [mediaMode, setMediaMode] = useState('live')
   const [libraryTopics, setLibraryTopics] = useState(loadTopicLibrary)
   const [refreshingTopics, setRefreshingTopics] = useState(false)
   const [topicRefreshError, setTopicRefreshError] = useState('')
@@ -199,15 +201,50 @@ export default function NewSessionForm({ onSubmit, queueCount }) {
           </label>
         </div>
 
-        <VoiceTranscriptRecorder
-          key={recorderResetKey}
-          resetKey={recorderResetKey}
-          topic={topic}
-          setTranscript={setTranscript}
-          onRecordingChange={setIsRecording}
-          onTranscribingChange={setIsTranscribing}
-          onMediaReady={setMediaDraft}
-        />
+        <div className="media-mode-tabs" role="tablist" aria-label="Presentation input source">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mediaMode === 'live'}
+            className={`media-mode-tab ${mediaMode === 'live' ? 'active' : ''}`}
+            onClick={() => setMediaMode('live')}
+            disabled={busy}
+          >
+            Record live
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mediaMode === 'upload'}
+            className={`media-mode-tab ${mediaMode === 'upload' ? 'active' : ''}`}
+            onClick={() => setMediaMode('upload')}
+            disabled={busy}
+          >
+            Upload a video
+          </button>
+        </div>
+
+        {mediaMode === 'live' ? (
+          <VoiceTranscriptRecorder
+            key={`live-${recorderResetKey}`}
+            resetKey={recorderResetKey}
+            topic={topic}
+            setTranscript={setTranscript}
+            onRecordingChange={setIsRecording}
+            onTranscribingChange={setIsTranscribing}
+            onMediaReady={setMediaDraft}
+          />
+        ) : (
+          <VideoUploadPanel
+            key={`upload-${recorderResetKey}`}
+            resetKey={recorderResetKey}
+            topic={topic}
+            setTranscript={setTranscript}
+            onTranscribingChange={setIsTranscribing}
+            onMediaReady={setMediaDraft}
+            visionEnabled={visionEnabled}
+          />
+        )}
 
         <label className="field transcript-field">
           <div className="field-row">

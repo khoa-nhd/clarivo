@@ -45,6 +45,11 @@ AI_TEMPERATURE=0.1
 AI_MAX_ATTEMPTS=2
 TRANSCRIPTION_TIMEOUT_SECONDS=120
 
+AI_EVIDENCE_FIELDS=true
+AI_CACHE_TTL_SECONDS=3600
+AI_CACHE_MAX_ENTRIES=32
+AI_RETRY_BACKOFF_SECONDS=1.0
+
 MAX_AUDIO_BYTES=3500000
 MAX_RECORDING_SECONDS=300
 MAX_TRANSCRIPT_CHARS=20000
@@ -56,6 +61,23 @@ ALLOWED_ORIGINS=https://clarivo-kohl.vercel.app
 
 LOCAL_SCORING_ENABLED=false
 ```
+
+### If the content report starts failing right after deploy
+
+The report now includes per-dimension evidence and a transcript-vs-reference
+comparison. Those add optional properties to the Workers AI function-call
+schema, and that extended schema has **not** been exercised against the live
+Qwen deployment - only against a local fake and the mock provider. If analysis
+begins failing immediately after this deploy, set:
+
+```env
+AI_EVIDENCE_FIELDS=false
+```
+
+and redeploy the backend. That removes the extra fields from both the schema
+and the prompt, returning the report to the previous seven-score behaviour. It
+is a one-variable rollback; no code change is needed. Verify with a single
+session, then decide whether to re-enable.
 
 Important: keep `LOCAL_SCORING_ENABLED=false` on the current Vercel backend. The Phase 20 OpenVINO Audio/Vision stack is the local Intel analyzer and is not included in `backend/requirements.txt` used by the public serverless deployment.
 

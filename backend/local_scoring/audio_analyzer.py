@@ -200,15 +200,62 @@ def _runs(mask: np.ndarray) -> list[tuple[bool, int, int]]:
     return out
 
 
-def _smooth(mask: np.ndarray, frame_seconds: float) -> np.ndarray:
+def _smooth(
+    mask: np.ndarray,
+    frame_seconds: float,
+    *,
+    fill_gap_max_seconds: float = 0.15,
+    drop_blip_max_seconds: float = 0.12,
+) -> np.ndarray:
     mask = mask.copy()
     for speech, s, e in _runs(mask):
-        if not speech and s > 0 and e < len(mask) and (e - s) * frame_seconds < 0.15:
+        if not speech and s > 0 and e < len(mask) and (e - s) * frame_seconds < fill_gap_max_seconds:
             mask[s:e] = True
     for speech, s, e in _runs(mask):
-        if speech and (e - s) * frame_seconds < 0.12:
+        if speech and (e - s) * frame_seconds < drop_blip_max_seconds:
             mask[s:e] = False
     return mask
+
+
+def _otsu_threshold(values: np.ndarray, bins: int = 256) -> tuple[float, float]:
+    """Otsu's bimodal split of frame energies, in dB.
+
+    Returns ``(threshold_db, separation_db)`` where the separation is the gap
+    between the two class means. A real recording has a loud speech lobe and a
+    quiet background lobe tens of dB apart; a recording that is entirely speech
+    - or entirely room tone - has one lobe and a small separation, which is how
+    the caller detects that there is nothing to split.
+    """
+    values = np.asarray(values, dtype=float)
+    if values.size < 2:
+        return float(values[0]) if values.size else -80.0, 0.0
+
+    hist, edges = np.histogram(values, bins=bins)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    total = float(hist.sum())
+    if total <= 0:
+        return float(np.median(values)), 0.0
+
+    weight = np.cumsum(hist) / total
+    mean = np.cumsum(hist * centers) / total
+    grand_mean = mean[-1]
+
+    denominator = weight * (1.0 - weight)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        between = np.where(
+            denominator > 1e-12,
+            (grand_mean * weight - mean) ** 2 / np.maximum(denominator, 1e-12),
+            -np.inf,
+        )
+    if not np.any(np.isfinite(between)):
+        return float(np.median(values)), 0.0
+
+    threshold = float(centers[int(np.argmax(between))])
+    low = values[values <= threshold]
+    high = values[values > threshold]
+    if low.size == 0 or high.size == 0:
+        return threshold, 0.0
+    return threshold, float(np.mean(high) - np.mean(low))
 
 
 def _merge_sample_regions(
@@ -348,19 +395,44 @@ def _speech_activity(audio: np.ndarray, sr: int, cfg: AudioConfig) -> dict[str, 
     db = librosa.amplitude_to_db(np.maximum(rms, 1e-8), ref=1.0)
 
     if len(db):
-        noise_floor = float(np.percentile(db, cfg.vad_noise_percentile))
+        otsu_threshold, separation = _otsu_threshold(db)
+        bimodal = separation >= float(cfg.vad_min_bimodal_separation_db)
         speech_ref = float(np.percentile(db, cfg.vad_speech_percentile))
-        dynamic = max(0.0, speech_ref - noise_floor)
-        margin = float(np.clip(dynamic * 0.48, cfg.vad_min_margin_db, cfg.vad_max_margin_db))
-        threshold = noise_floor + margin
-        # Only protect against numerical floor/near-clipping extremes; do NOT impose
-        # a normal-microphone threshold such as -52 dBFS.
-        threshold = float(np.clip(threshold, -78.0, -18.0))
+
+        if bimodal:
+            # Two lobes: the valley Otsu found is the threshold. The guard below
+            # keeps it away from the speech lobe even if the histogram search is
+            # misled by an unusual level distribution.
+            threshold = min(otsu_threshold, speech_ref - float(cfg.vad_min_peak_margin_db))
+            noise_floor = float(np.mean(db[db <= threshold])) if np.any(db <= threshold) else (
+                float(np.percentile(db, cfg.vad_noise_percentile))
+            )
+            vad_mode = "bimodal_otsu"
+        else:
+            # One lobe: there is no background to separate from speech, so no
+            # energy threshold can answer "is this speech?". Treat every frame
+            # as active for timing purposes and let SNR plus transcript evidence
+            # settle the speech/no-speech question in _classify_speech_state.
+            threshold = float(np.min(db)) - float(cfg.vad_unimodal_floor_margin_db)
+            noise_floor = float(np.percentile(db, cfg.vad_noise_percentile))
+            vad_mode = "unimodal_no_background"
+
+        vad_diagnostics = {
+            "otsu_threshold_dbfs": float(otsu_threshold),
+            "otsu_separation_db": float(separation),
+        }
     else:
         noise_floor, speech_ref, threshold = -80.0, -70.0, -74.0
+        vad_mode = "empty"
+        vad_diagnostics = {"otsu_threshold_dbfs": -74.0, "otsu_separation_db": 0.0}
 
     frame_seconds = frame_len / sr
-    speech = _smooth(db > threshold, frame_seconds)
+    speech = _smooth(
+        db > threshold,
+        frame_seconds,
+        fill_gap_max_seconds=cfg.vad_fill_gap_max_seconds,
+        drop_blip_max_seconds=cfg.vad_drop_blip_max_seconds,
+    )
 
     duration = float(len(audio) / sr)
     speaking = float(np.sum(speech) * frame_seconds)
@@ -428,6 +500,9 @@ def _speech_activity(audio: np.ndarray, sr: int, cfg: AudioConfig) -> dict[str, 
         "noise_floor_dbfs": noise_floor,
         "speech_reference_dbfs": speech_ref,
         "speech_threshold_dbfs": threshold,
+        "vad_mode": vad_mode,
+        "vad_otsu_threshold_dbfs": vad_diagnostics["otsu_threshold_dbfs"],
+        "vad_otsu_separation_db": vad_diagnostics["otsu_separation_db"],
         "audio_dynamic_range_db": max(0.0, speech_ref - noise_floor),
         "average_volume_dbfs": avg_speech_db,
         "speech_snr_db": max(0.0, avg_speech_db - noise_floor),
@@ -436,15 +511,39 @@ def _speech_activity(audio: np.ndarray, sr: int, cfg: AudioConfig) -> dict[str, 
         "clipping_ratio": float(np.mean(np.abs(audio) >= 0.985)) if len(audio) else 0.0,
         "speech_density_window_std": safe_std(densities),
         "asr_regions_samples": sample_regions,
+        # Internal: popped by analyze_audio before the metrics are serialised.
+        # Exposed so vad_benchmark.py can score the frame decision directly
+        # instead of inferring it from aggregate seconds.
+        "speech_frame_mask": speech,
+        "frame_seconds": frame_seconds,
     }
 
-def _classify_speech_state(raw: dict[str, Any], text_reliability: float, cfg: AudioConfig) -> str:
-    """Classify meaningful target speech conservatively.
+def _classify_speech_state(
+    raw: dict[str, Any],
+    text_reliability: float,
+    cfg: AudioConfig,
+    *,
+    word_count: int = 0,
+    transcript_supplied: bool = False,
+) -> str:
+    """Decide whether this recording may be scored at all.
 
-    The recorder cannot truly separate a nearby speaker from the target without a
-    dedicated speaker-identification model.  v17 therefore uses a strict evidence
-    gate: enough sustained speech, enough speech/noise separation, and adequate peak
-    level are required before any audio score is allowed.
+    This gate is severe in effect: a ``NO_SPEECH_DETECTED`` verdict blanks every
+    voice score, so a false negative here costs the user the entire voice report.
+    Evidence is therefore weighed rather than applied as a chain of independent
+    vetoes.
+
+    Two of the old vetoes were wrong:
+
+    * An absolute ``-48 dBFS`` peak gate rejected quiet-but-clean recordings.
+      Microphone gain varies by tens of dB across laptops, so a -60 dBFS peak at
+      24 dB SNR is perfectly analysable. Absolute level is now only a dead-signal
+      guard and SNR carries the audibility decision.
+    * The SNR veto assumed an energy threshold had separated speech from
+      background. When the histogram has a single lobe there is no background to
+      measure against, so SNR is near zero by construction and the veto fired on
+      recordings that were nothing but speech. A supplied transcript containing
+      real words is stronger evidence than that degenerate SNR.
     """
     duration = float(raw.get("duration_seconds", 0.0) or 0.0)
     speaking = float(raw.get("speaking_time_seconds", 0.0) or 0.0)
@@ -452,6 +551,12 @@ def _classify_speech_state(raw: dict[str, Any], text_reliability: float, cfg: Au
     snr = float(raw.get("speech_snr_db", 0.0) or 0.0)
     peak = float(raw.get("peak_amplitude", 0.0) or 0.0)
     peak_dbfs = 20.0 * math.log10(max(peak, 1e-8))
+    unimodal = str(raw.get("vad_mode", "")) == "unimodal_no_background"
+
+    # Direct evidence: a transcript with real words means somebody spoke.
+    transcript_evidence = bool(
+        transcript_supplied and int(word_count) >= int(cfg.min_words_as_speech_evidence)
+    )
 
     if duration <= 0.0:
         return "NO_SPEECH_DETECTED"
@@ -459,11 +564,12 @@ def _classify_speech_state(raw: dict[str, Any], text_reliability: float, cfg: Au
         return "NO_SPEECH_DETECTED"
     if active_ratio < cfg.min_active_speaking_ratio_for_scoring:
         return "NO_SPEECH_DETECTED"
-    if snr < cfg.min_speech_snr_db_for_scoring:
-        return "NO_SPEECH_DETECTED"
     if peak_dbfs < cfg.min_speech_peak_dbfs_for_scoring:
+        # Numerically dead signal, not merely a quiet microphone.
         return "NO_SPEECH_DETECTED"
-    if text_reliability < 0.50 and active_ratio < 0.35:
+    if snr < cfg.min_speech_snr_db_for_scoring and not (unimodal and transcript_evidence):
+        return "NO_SPEECH_DETECTED"
+    if text_reliability < 0.50 and active_ratio < 0.35 and not transcript_evidence:
         return "NO_SPEECH_DETECTED"
     return "SPEECH_DETECTED"
 
@@ -777,7 +883,8 @@ def _pace_score(wpm: float, language: str) -> float:
     return piecewise_linear(wpm,pts)
 
 
-def _scores(m: dict[str, Any], *, language: str, text_reliability: float) -> dict[str, Any]:
+def _scores(m: dict[str, Any], *, language: str, text_reliability: float, cfg: AudioConfig | None = None) -> dict[str, Any]:
+    cfg = cfg or AudioConfig()
     speech_state = str(m.get("speech_state", "SPEECH_DETECTED"))
     if speech_state == "NO_SPEECH_DETECTED":
         return {
@@ -891,12 +998,12 @@ def _scores(m: dict[str, Any], *, language: str, text_reliability: float) -> dic
     # dominate the final score.  When the web transcript is supplied later,
     # text_reliability becomes 1.0 and WPM/filler regain their full intended weight.
     components = [
-        (volume, 0.30, 1.0),
-        (pause, 0.27, 0.0 if pause is None else 1.0),
-        (volume_stability, 0.08, 1.0),
-        (pace, 0.18, text_reliability),
-        (filler, 0.10, filler_reliability),
-        (pace_stability, 0.07, pace_stability_rel),
+        (volume, cfg.weight_volume, 1.0),
+        (pause, cfg.weight_pause, 0.0 if pause is None else 1.0),
+        (volume_stability, cfg.weight_volume_stability, 1.0),
+        (pace, cfg.weight_pace, text_reliability),
+        (filler, cfg.weight_filler, filler_reliability),
+        (pace_stability, cfg.weight_pace_stability, pace_stability_rel),
     ]
     num = sum(score * weight * rel for score, weight, rel in components if score is not None)
     den = sum(weight * rel for score, weight, rel in components if score is not None)
@@ -927,8 +1034,8 @@ def _scores(m: dict[str, Any], *, language: str, text_reliability: float) -> dic
         "score_confidence": score_confidence,
         "pace_used_in_overall": pace_used,
         "fillers_used_in_overall": filler_used,
-        "pace_influence_weight": float(0.18 * text_reliability if pace_used else 0.0),
-        "filler_influence_weight": float(0.10 * filler_reliability if filler_used else 0.0),
+        "pace_influence_weight": float(cfg.weight_pace * text_reliability if pace_used else 0.0),
+        "filler_influence_weight": float(cfg.weight_filler * filler_reliability if filler_used else 0.0),
         "overall": overall,
     }
     out: dict[str, Any] = {}
@@ -1006,6 +1113,8 @@ def analyze_audio(
     raw = _speech_activity(audio, sr, cfg)
     feature_seconds = time.perf_counter() - t0
     speech_regions = raw.pop("asr_regions_samples", [])
+    raw.pop("speech_frame_mask", None)
+    raw.pop("frame_seconds", None)
 
     segments: list[dict[str, Any]] = []
     asr_seconds = 0.0
@@ -1022,10 +1131,18 @@ def analyze_audio(
         "domain_correction_count": 0,
     }
 
+    # Gate for skipping local ASR entirely. The SNR term is meaningful only when
+    # a background lobe was actually separated from speech; in unimodal mode it
+    # is ~0 by construction, so applying it there would skip ASR on exactly the
+    # recordings that are wall-to-wall speech.
+    unimodal_vad = str(raw.get("vad_mode", "")) == "unimodal_no_background"
     preliminary_no_speech = (
         float(raw.get("speaking_time_seconds", 0.0)) < cfg.min_speech_seconds_for_scoring
         or float(raw.get("active_speaking_ratio", 0.0)) < cfg.min_active_speaking_ratio_for_scoring
-        or float(raw.get("speech_snr_db", 0.0)) < cfg.min_speech_snr_db_for_scoring
+        or (
+            not unimodal_vad
+            and float(raw.get("speech_snr_db", 0.0)) < cfg.min_speech_snr_db_for_scoring
+        )
     )
     if transcript is None and not preliminary_no_speech:
         transcript, transcript_raw, segments, asr_seconds, asr_used_device, asr_quality = transcribe_openvino(
@@ -1136,6 +1253,12 @@ def analyze_audio(
         "implicit_filler_durations_seconds": implicit_filler.get("implicit_filler_durations_seconds", []),
         "implicit_filler_source": implicit_filler.get("implicit_filler_source", "none"),
         "fillers_per_minute": filler_count / duration_min,
+        # Rate per 100 words, which SCORING_V11.md describes as the primary
+        # filler measure and local_delivery.py already publishes to the client -
+        # but which was never actually computed, so the field was always null.
+        # Unlike the per-minute rate this one does not move when the presenter
+        # simply speaks faster or slower.
+        "fillers_per_100_words": (100.0 * filler_count / word_count) if word_count else None,
         "filler_words": filler_words,
         "filler_count_before_guard": filler_count_raw,
         "filler_guard_triggered": filler_guard,
@@ -1160,7 +1283,13 @@ def analyze_audio(
     metrics["text_metric_source"] = "external_transcript" if transcript_supplied else "openvino_whisper"
     metrics["text_metric_reliability"] = round(text_reliability, 3)
     metrics["pace_metric_reliability"] = round(text_reliability, 3)
-    metrics["speech_state"] = _classify_speech_state(raw, text_reliability, cfg)
+    metrics["speech_state"] = _classify_speech_state(
+        raw,
+        text_reliability,
+        cfg,
+        word_count=word_count,
+        transcript_supplied=transcript_supplied,
+    )
     metrics["no_speech_detected"] = metrics["speech_state"] == "NO_SPEECH_DETECTED"
     metrics["audio_status"] = (
         "N/A (No speech detected)" if metrics["no_speech_detected"] else "SPEECH_DETECTED"
@@ -1170,6 +1299,16 @@ def analyze_audio(
         metrics["long_pause_count"] = 0
         metrics["very_long_pause_count"] = 0
         metrics["excessive_pause_time_seconds"] = 0.0
+        if metrics.get("vad_mode") == "unimodal_no_background":
+            # A single-lobe histogram with no transcript evidence is room tone:
+            # every frame passed the energy threshold, but the verdict above says
+            # none of it was speech. Reporting the whole recording as "speaking
+            # time" would contradict the verdict shown next to it.
+            metrics["speaking_time_seconds"] = 0.0
+            metrics["speaking_ratio"] = 0.0
+            metrics["active_speaking_ratio"] = 0.0
+            metrics["voice_activity_ratio"] = 0.0
+            metrics["silence_time_seconds"] = float(metrics.get("duration_seconds", 0.0) or 0.0)
     metrics["domain_correction_count"] = int(asr_quality.get("domain_correction_count", 0) or 0)
     if metrics["no_speech_detected"]:
         metrics.update({
@@ -1184,6 +1323,7 @@ def analyze_audio(
             "implicit_filler_durations_seconds": [],
             "implicit_filler_source": "none",
             "fillers_per_minute": None,
+            "fillers_per_100_words": None,
             "filler_words": {},
             "filler_count_before_guard": 0,
             "filler_guard_triggered": False,
@@ -1199,7 +1339,7 @@ def analyze_audio(
     )
     metrics["filler_metric_reliability"] = round(float(filler_rel),3)
     metrics["transcript_confidence_method"] = "evidence-based ASR quality heuristic (no token logprob available in current OpenVINO pipeline)"
-    scores = _scores(metrics, language=language, text_reliability=text_reliability)
+    scores = _scores(metrics, language=language, text_reliability=text_reliability, cfg=cfg)
     if metrics["speech_state"] == "NO_SPEECH_DETECTED":
         scores["pace_used_in_overall"] = False
         scores["fillers_used_in_overall"] = False

@@ -6,8 +6,9 @@ import re
 import uuid
 from typing import Any
 
-import requests
 from pydantic import ValidationError
+
+from .cloudflare_client import CloudflareAIError, run_tool_call
 
 from .schemas import (
     DrillChallenge,
@@ -60,57 +61,6 @@ TOPIC_PROFILE_SCHEMA = {
 }
 
 
-def _decode_arguments(value: Any) -> dict[str, Any] | None:
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str):
-        try:
-            result = json.loads(value)
-        except json.JSONDecodeError:
-            return None
-        return result if isinstance(result, dict) else None
-    return None
-
-
-def _extract_tool_arguments(payload: dict[str, Any], tool_name: str) -> dict[str, Any] | None:
-    result: Any = payload.get("result", payload)
-    if not isinstance(result, dict):
-        return None
-
-    calls = result.get("tool_calls")
-    if isinstance(calls, list):
-        for call in calls:
-            if not isinstance(call, dict) or call.get("name") not in (None, tool_name):
-                continue
-            args = _decode_arguments(call.get("arguments"))
-            if args is not None:
-                return args
-
-    choices = result.get("choices")
-    if isinstance(choices, list):
-        for choice in choices:
-            if not isinstance(choice, dict):
-                continue
-            message = choice.get("message")
-            if not isinstance(message, dict):
-                continue
-            for call in message.get("tool_calls") or []:
-                if not isinstance(call, dict):
-                    continue
-                function = call.get("function")
-                if isinstance(function, dict):
-                    if function.get("name") not in (None, tool_name):
-                        continue
-                    args = _decode_arguments(function.get("arguments"))
-                else:
-                    args = _decode_arguments(call.get("arguments"))
-                if args is not None:
-                    return args
-
-    response_value = result.get("response")
-    return response_value if isinstance(response_value, dict) else None
-
-
 def _cloudflare_structured(
     *,
     tool_name: str,
@@ -120,58 +70,32 @@ def _cloudflare_structured(
     user_prompt: str,
     max_tokens: int = 2200,
 ) -> dict[str, Any]:
-    account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
-    auth_token = os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip()
-    model = os.getenv("CLOUDFLARE_MODEL", "@cf/qwen/qwen3-30b-a3b-fp8").strip()
-    timeout = float(os.getenv("AI_TIMEOUT_SECONDS", "120"))
-    temperature = float(os.getenv("AI_TEMPERATURE", "0.1"))
+    """One structured drill request.
 
-    if not account_id or not auth_token:
-        raise DrillAIError("Cloudflare credentials are missing.")
-
-    url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
+    Transport, retry policy and tool-call extraction now live in
+    ``cloudflare_client``. This used to retry twice on its own while
+    ``_validated_structured_call`` retried twice around it, so a single drill
+    step could issue four full-length inference calls before giving up.
+    """
     transport = (
         f"\n\nSTRUCTURED OUTPUT: Call the function tool `{tool_name}` exactly once. "
         "Return the complete result only through its tool arguments. Do not output markdown or free-form JSON."
     )
-
-    last_error: Exception | None = None
-    for attempt in range(2):
-        prompt = user_prompt
-        if attempt:
-            prompt += "\n\nRetry: obey the function schema exactly."
-        try:
-            response = requests.post(
-                url,
-                headers={"Authorization": f"Bearer {auth_token}", "Content-Type": "application/json"},
-                json={
-                    "messages": [
-                        {"role": "system", "content": system_prompt + transport},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "tools": [{"name": tool_name, "description": tool_description, "parameters": parameters}],
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "stream": False,
-                },
-                timeout=timeout,
-            )
-            payload = response.json()
-            if not response.ok or payload.get("success") is False:
-                errors = payload.get("errors") or []
-                message = "; ".join(
-                    str(item.get("message"))
-                    for item in errors
-                    if isinstance(item, dict) and item.get("message")
-                )
-                raise DrillAIError(message or f"Cloudflare AI request failed (HTTP {response.status_code}).")
-            structured = _extract_tool_arguments(payload, tool_name)
-            if structured is None:
-                raise DrillAIError("The model did not return the required structured tool call.")
-            return structured
-        except (requests.RequestException, ValueError, DrillAIError) as exc:
-            last_error = exc
-    raise DrillAIError(str(last_error or "Structured drill request failed."))
+    try:
+        structured, _raw, _model = run_tool_call(
+            tool_name=tool_name,
+            tool_description=tool_description,
+            parameters=parameters,
+            system_prompt=system_prompt + transport,
+            user_prompt=user_prompt,
+            max_tokens=max_tokens,
+            retry_prompts=["Retry: obey the function schema exactly."],
+        )
+    except CloudflareAIError as exc:
+        raise DrillAIError(str(exc)) from exc
+    if structured is None:
+        raise DrillAIError("The model did not return the required structured tool call.")
+    return structured
 
 
 def _validated_structured_call(
@@ -184,6 +108,12 @@ def _validated_structured_call(
     user_prompt: str,
     max_tokens: int = 2200,
 ):
+    """Request a structured result and validate it against ``model_cls``.
+
+    The transport layer already retries a missing or malformed tool call. This
+    adds exactly one further attempt, for the different failure of a well-formed
+    tool call whose *contents* violate the schema, with a prompt that says so.
+    """
     last_error: Exception | None = None
     for attempt in range(2):
         effective_prompt = user_prompt

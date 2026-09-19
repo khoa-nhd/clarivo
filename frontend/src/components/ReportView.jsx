@@ -24,11 +24,45 @@ function severityClass(severity = '') {
   return 'severity-medium'
 }
 
+const referenceGroups = [
+  ['contradicted_by_reference', 'Contradicts the reference', 'reference-bad'],
+  ['missing_from_transcript', 'In the reference but not covered', 'reference-warn'],
+  ['unsupported_by_reference', 'Said, but the reference does not confirm it', 'reference-warn'],
+  ['supported_claims', 'Backed by the reference', 'reference-good'],
+]
+
+function ReferenceCheckCard({ check }) {
+  if (!check || check.reference_available === false) return null
+  const groups = referenceGroups
+    .map(([key, title, tone]) => [title, tone, Array.isArray(check[key]) ? check[key].filter(Boolean) : []])
+    .filter(([, , items]) => items.length > 0)
+  if (!groups.length) return null
+
+  return (
+    <section className="report-section reference-check">
+      <div className="section-heading">
+        <div><div className="eyebrow">Grounding</div><h2>Checked against your reference</h2></div>
+      </div>
+      <div className="reference-groups">
+        {groups.map(([title, tone, items]) => (
+          <div className={`reference-group ${tone}`} key={title}>
+            <small>{title}</small>
+            <ul>{items.map((item, index) => <li key={index}>{item}</li>)}</ul>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
 export default function ReportView({ result, delivery, deliveryError }) {
   const scores = result?.scores || {}
   const issues = Array.isArray(result?.issues) ? result.issues : []
   const priorities = Array.isArray(result?.top_priorities) ? result.top_priorities : []
   const overall = overallScore(scores)
+  // Optional: only present when the model returned per-dimension justification.
+  const evidence = result?.dimension_evidence || {}
+  const referenceCheck = result?.reference_check || null
 
   return (
     <div className="report-stack">
@@ -45,9 +79,17 @@ export default function ReportView({ result, delivery, deliveryError }) {
           </div>
         </div>
         <div className="score-grid">
-          {Object.entries(scoreLabels).map(([key, label]) => <ScoreBar key={key} label={label} value={scores[key]} />)}
+          {Object.entries(scoreLabels).map(([key, label]) => (
+            <ScoreBar key={key} label={label} value={scores[key]} evidence={evidence[key]} />
+          ))}
         </div>
       </section>
+
+      {Object.keys(evidence).length > 0 && (
+        <p className="muted evidence-hint">Tap any score to see the transcript evidence behind it.</p>
+      )}
+
+      <ReferenceCheckCard check={referenceCheck} />
 
       <DeliverySummary delivery={delivery} error={deliveryError} />
 

@@ -6,3 +6,4 @@ numpy>=1.26
 librosa>=0.10.2
 soundfile>=0.12.1
 psutil>=6.0
+pytest>=8.0

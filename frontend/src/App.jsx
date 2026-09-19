@@ -37,6 +37,7 @@ export default function App() {
           <NewSessionForm
             onSubmit={queue.addSession}
             queueCount={queue.counts.queued + queue.counts.processing}
+            visionEnabled={queue.localVisionEnabled}
           />
         )}
 

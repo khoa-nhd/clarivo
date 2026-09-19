@@ -48,15 +48,31 @@ Projection compression is a proxy for forward/backward bending. It is referenced
 
 ## Audio overall
 
-Reliability-weighted components:
+Reliability-weighted components. These are the values in `AudioConfig`; the
+figures previously printed here (28/25/24/8/8/7) did not match the code.
 
-- pause control: 28%
-- audibility: 25%
-- pace: 24% × transcript reliability
-- volume stability: 8%
-- filler: 8% × filler reliability (omitted if too unreliable)
-- pace stability: 7%
+- audibility (`weight_volume`): 30%
+- pause control (`weight_pause`): 27%
+- pace (`weight_pace`): 18% × transcript reliability
+- filler (`weight_filler`): 10% × filler reliability
+- volume stability (`weight_volume_stability`): 8%
+- pace stability (`weight_pace_stability`): 7%
+
+Weights are normalised over whichever components are available, so a component
+that cannot be measured does not silently drag the total down.
 
 ### Filler
 
-The raw filler rate is primarily evaluated as fillers per 100 words. Local Whisper can suppress disfluencies, so local filler reliability is conservative. A web/external transcript is trusted at full reliability.
+Both rates are reported: `fillers_per_minute` (used for scoring) and
+`fillers_per_100_words` (rate independent of speaking speed). Local Whisper can
+suppress disfluencies, so local filler reliability is conservative. A
+web/external transcript is trusted at full reliability.
+
+## Speech detection
+
+The speech/silence threshold is chosen by Otsu's method over the frame-energy
+histogram in dB, with the resulting class separation deciding whether the
+recording is bimodal (speech plus background) at all. The earlier
+percentile-based estimate assumed the quietest 18% of frames were always
+background, which fails once speech fills most of the recording. See
+`vad_benchmark.py` for the measured before/after.

@@ -1,17 +1,128 @@
 from __future__ import annotations
 
-import json
 import os
 from typing import Any
 
-import requests
+from .cloudflare_client import (
+    CloudflareAIError,
+    decode_arguments as _decode_arguments,
+    extract_text as _extract_model_output,
+    extract_tool_arguments,
+    run_tool_call,
+)
 
-
-class CloudflareAIError(RuntimeError):
-    pass
-
+__all__ = [
+    "CloudflareAIError",
+    "TOOL_NAME",
+    "run_qwen",
+    "run_qwen_structured",
+]
 
 TOOL_NAME = "submit_evaluation"
+
+CATEGORIES = [
+    "correctness",
+    "completeness",
+    "logical_flow",
+    "clarity",
+    "examples",
+    "jumped_steps",
+    "audience_fit",
+]
+
+
+def _extract_tool_arguments(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Backwards-compatible wrapper over the shared extractor."""
+    return extract_tool_arguments(payload, TOOL_NAME)
+
+
+def _dimension_evidence_schema() -> dict[str, Any]:
+    """Per-dimension justification for each score.
+
+    A bare number is not reviewable: the presenter cannot tell whether
+    "clarity 62" came from something they said or from the model's mood, and a
+    maintainer cannot tell a rubric change from a regression. This attaches the
+    transcript spans a score was actually derived from.
+
+    Every field is optional. The seven scores remain the contract the UI relies
+    on, and requiring a large extra object would turn a model that omits one
+    sub-field into a failed evaluation and a second paid retry - a bad trade for
+    supplementary detail.
+    """
+    entry = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "evidence": {
+                "type": "array",
+                "maxItems": 3,
+                "items": {"type": "string"},
+                "description": "Short spans copied verbatim from the transcript that drove this score.",
+            },
+            "reasoning": {
+                "type": "string",
+                "description": "One sentence linking the evidence to the score.",
+            },
+            "confidence": {
+                "type": "string",
+                "enum": ["high", "medium", "low", "insufficient_evidence"],
+                "description": (
+                    "Use insufficient_evidence when the transcript does not support "
+                    "a confident judgement; never guess to fill the field."
+                ),
+            },
+        },
+    }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {name: entry for name in CATEGORIES},
+    }
+
+
+def _reference_check_schema() -> dict[str, Any]:
+    """Explicit transcript-versus-reference comparison.
+
+    The rubric already tells the model to compare against the reference, but the
+    result of that comparison was only ever visible indirectly, folded into
+    correctness and completeness. Reporting it separately lets a presenter see
+    which specific claims were supported, missing or contradicted - and makes a
+    hallucinated "missing concept" visible rather than buried in a score.
+    """
+    string_list = {"type": "array", "maxItems": 5, "items": {"type": "string"}}
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "supported_claims": string_list,
+            "missing_from_transcript": string_list,
+            "contradicted_by_reference": string_list,
+            "unsupported_by_reference": string_list,
+            "reference_available": {"type": "boolean"},
+        },
+    }
+
+
+def evidence_enabled() -> bool:
+    """Whether to ask the model for per-dimension evidence.
+
+    A kill switch, not a feature flag. The evidence fields extend the tool
+    schema sent to Workers AI, and that schema has not been exercised against
+    the live Qwen deployment. If it turns out to be rejected in production, the
+    seven scores the UI depends on would fail along with it - so it can be
+    disabled by setting one environment variable, with no code change and no
+    redeploy:
+
+        AI_EVIDENCE_FIELDS=false
+
+    Because the fields are optional in the schema and additive in the response,
+    turning them off degrades the report to exactly the previous behaviour
+    rather than breaking anything.
+    """
+    raw = os.getenv("AI_EVIDENCE_FIELDS")
+    if raw is None or not raw.strip():
+        return True
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _evaluation_tool() -> dict[str, Any]:
@@ -20,18 +131,9 @@ def _evaluation_tool() -> dict[str, Any]:
     The evaluator prompt remains the source of truth for scoring. This tool only
     constrains the transport format so a stray quote cannot break json.loads().
     """
-    categories = [
-        "correctness",
-        "completeness",
-        "logical_flow",
-        "clarity",
-        "examples",
-        "jumped_steps",
-        "audience_fit",
-    ]
     score_properties = {
         name: {"type": "integer", "minimum": 0, "maximum": 100}
-        for name in categories
+        for name in CATEGORIES
     }
 
     return {
@@ -48,7 +150,7 @@ def _evaluation_tool() -> dict[str, Any]:
                     "type": "object",
                     "additionalProperties": False,
                     "properties": score_properties,
-                    "required": categories,
+                    "required": CATEGORIES,
                 },
                 "issues": {
                     "type": "array",
@@ -57,7 +159,7 @@ def _evaluation_tool() -> dict[str, Any]:
                         "type": "object",
                         "additionalProperties": False,
                         "properties": {
-                            "category": {"type": "string", "enum": categories},
+                            "category": {"type": "string", "enum": CATEGORIES},
                             "severity": {
                                 "type": "string",
                                 "enum": ["low", "medium", "high"],
@@ -88,6 +190,14 @@ def _evaluation_tool() -> dict[str, Any]:
                 },
                 "overall_feedback": {"type": "string"},
                 "revision_guidance": {"type": "string"},
+                **(
+                    {
+                        "dimension_evidence": _dimension_evidence_schema(),
+                        "reference_check": _reference_check_schema(),
+                    }
+                    if evidence_enabled()
+                    else {}
+                ),
             },
             "required": [
                 "scores",
@@ -101,7 +211,7 @@ def _evaluation_tool() -> dict[str, Any]:
 
 
 def _transport_override() -> str:
-    return (
+    base = (
         "\n\nSTRUCTURED OUTPUT TRANSPORT OVERRIDE:\n"
         f"The API provides exactly one function tool named {TOOL_NAME}. "
         "After completing the evaluation, CALL THAT TOOL EXACTLY ONCE. "
@@ -109,151 +219,21 @@ def _transport_override() -> str:
         "Do not return the evaluation as normal assistant prose or a markdown code block. "
         "The tool argument schema is the required output format."
     )
-
-
-def _decode_arguments(value: Any) -> dict[str, Any] | None:
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str):
-        try:
-            decoded = json.loads(value)
-        except json.JSONDecodeError:
-            return None
-        return decoded if isinstance(decoded, dict) else None
-    return None
-
-
-def _extract_tool_arguments(payload: dict[str, Any]) -> dict[str, Any] | None:
-    """Accept Workers AI native and OpenAI-like tool-call response shapes."""
-    result: Any = payload.get("result", payload)
-
-    # Native Workers AI traditional function-calling response:
-    # {"result": {"tool_calls": [{"name": ..., "arguments": {...}}]}}
-    if isinstance(result, dict):
-        tool_calls = result.get("tool_calls")
-        if isinstance(tool_calls, list):
-            for call in tool_calls:
-                if not isinstance(call, dict):
-                    continue
-                if call.get("name") not in (None, TOOL_NAME):
-                    continue
-                args = _decode_arguments(call.get("arguments"))
-                if args is not None:
-                    return args
-
-        # Some compatible APIs nest tool calls in choices[].message.tool_calls[].
-        choices = result.get("choices")
-        if isinstance(choices, list):
-            for choice in choices:
-                if not isinstance(choice, dict):
-                    continue
-                message = choice.get("message")
-                if not isinstance(message, dict):
-                    continue
-                calls = message.get("tool_calls")
-                if not isinstance(calls, list):
-                    continue
-                for call in calls:
-                    if not isinstance(call, dict):
-                        continue
-                    function = call.get("function")
-                    if isinstance(function, dict):
-                        if function.get("name") not in (None, TOOL_NAME):
-                            continue
-                        args = _decode_arguments(function.get("arguments"))
-                    else:
-                        args = _decode_arguments(call.get("arguments"))
-                    if args is not None:
-                        return args
-
-        # Defensive support if a provider returns the structured object directly.
-        response_value = result.get("response")
-        if isinstance(response_value, dict):
-            return response_value
-
-    return None
-
-
-def _extract_model_output(payload: dict[str, Any]) -> object:
-    """Fallback extraction for non-tool text responses."""
-    result: object = payload.get("result", payload)
-
-    if isinstance(result, dict):
-        if "response" in result:
-            return result["response"]
-
-        choices = result.get("choices")
-        if isinstance(choices, list) and choices:
-            first = choices[0]
-            if isinstance(first, dict):
-                message = first.get("message")
-                if isinstance(message, dict) and "content" in message:
-                    return message["content"]
-                if "text" in first:
-                    return first["text"]
-
-    return result
-
-
-def _post_inference(
-    *,
-    account_id: str,
-    auth_token: str,
-    model: str,
-    system_prompt: str,
-    user_prompt: str,
-    timeout: float,
-    max_tokens: int,
-    temperature: float,
-) -> dict[str, Any]:
-    url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
-
-    try:
-        response = requests.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {auth_token}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": system_prompt + _transport_override(),
-                    },
-                    {"role": "user", "content": user_prompt},
-                ],
-                # Traditional Workers AI function-calling format.
-                "tools": [_evaluation_tool()],
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "stream": False,
-            },
-            timeout=timeout,
-        )
-    except requests.Timeout as exc:
-        raise CloudflareAIError("Cloudflare AI request timed out. Retry this session.") from exc
-    except requests.RequestException as exc:
-        raise CloudflareAIError(f"Could not reach Cloudflare AI: {exc}") from exc
-
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise CloudflareAIError(
-            f"Cloudflare returned a non-JSON response (HTTP {response.status_code})."
-        ) from exc
-
-    if not response.ok or payload.get("success") is False:
-        messages: list[str] = []
-        for error in payload.get("errors", []) or []:
-            if isinstance(error, dict) and error.get("message"):
-                messages.append(str(error["message"]))
-        message = "; ".join(messages) or (
-            f"Cloudflare AI request failed (HTTP {response.status_code})."
-        )
-        raise CloudflareAIError(message)
-
-    return payload
+    if not evidence_enabled():
+        # Kill switch engaged: do not ask for fields the schema no longer offers.
+        return base
+    return base + (
+        "\n\nEVIDENCE REQUIREMENTS:\n"
+        "Also fill dimension_evidence for every dimension you scored. For each one, quote at "
+        "most three short spans copied verbatim from the transcript that your score is based on, "
+        "add one sentence of reasoning, and state your confidence. "
+        "If the transcript does not contain enough material to judge a dimension, set that "
+        "dimension's confidence to insufficient_evidence and leave its evidence empty rather "
+        "than inventing support for a number.\n"
+        "Fill reference_check only from the supplied reference content. Set reference_available "
+        "to false and leave the lists empty when no reference was supplied. Never state that "
+        "the reference contains something it does not contain."
+    )
 
 
 def run_qwen_structured(
@@ -268,18 +248,7 @@ def run_qwen_structured(
     validates the structured payload with the preserved Pydantic schema and may
     retry once if the model failed to call the tool or violated the schema.
     """
-    account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
-    auth_token = os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip()
-    model = os.getenv("CLOUDFLARE_MODEL", "@cf/qwen/qwen3-30b-a3b-fp8").strip()
-    timeout = float(os.getenv("AI_TIMEOUT_SECONDS", "120"))
     max_tokens = int(os.getenv("AI_MAX_TOKENS", "3000"))
-    temperature = float(os.getenv("AI_TEMPERATURE", "0.1"))
-
-    if not account_id or not auth_token:
-        raise CloudflareAIError(
-            "AI_PROVIDER=cloudflare but CLOUDFLARE_ACCOUNT_ID or "
-            "CLOUDFLARE_AUTH_TOKEN is missing."
-        )
 
     effective_user_prompt = user_prompt
     if retry_note:
@@ -289,20 +258,19 @@ def run_qwen_structured(
             + f"\nYou must call {TOOL_NAME} exactly once with every required field."
         )
 
-    payload = _post_inference(
-        account_id=account_id,
-        auth_token=auth_token,
-        model=model,
-        system_prompt=system_prompt,
+    # The evaluator owns the schema-retry loop, so this call does not add one of
+    # its own; a prose answer still comes back as raw text for the legacy JSON
+    # fallback path rather than raising here.
+    return run_tool_call(
+        tool_name=TOOL_NAME,
+        tool_description=_evaluation_tool()["description"],
+        parameters=_evaluation_tool()["parameters"],
+        system_prompt=system_prompt + _transport_override(),
         user_prompt=effective_user_prompt,
-        timeout=timeout,
         max_tokens=max_tokens,
-        temperature=temperature,
+        retry_prompts=None,
+        require_tool_call=False,
     )
-
-    structured = _extract_tool_arguments(payload)
-    raw = _extract_model_output(payload)
-    return structured, raw, model
 
 
 # Kept for compatibility with any local code that imported run_qwen directly.

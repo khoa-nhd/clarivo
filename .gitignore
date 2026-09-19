@@ -22,3 +22,20 @@ Thumbs.db
 # Local OpenVINO artifacts
 backend/local_scoring/models/
 backend/local_scoring/cache/
+
+# Self-recorded calibration/evaluation clips (raw video only; labels + reports stay tracked)
+backend/local_scoring/eval_data/clips/
+backend/local_scoring/eval_reports/*.json
+backend/local_scoring/eval_reports/*.md
+backend/app/eval_reports/*.json
+backend/app/eval_reports/*.md
+
+# Stray OpenVINO compiled-model cache. LOCAL_CACHE_DIR was resolving to the
+# process working directory when left blank; fixed in app/local_delivery.py,
+# ignored here so an older checkout or a custom LOCAL_CACHE_DIR cannot commit
+# multi-megabyte .blob files.
+runtime/
+*.blob
+
+# Local tooling state
+.claude/scheduled_tasks.lock

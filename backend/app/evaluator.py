@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import threading
+import time
+from collections import OrderedDict
 from typing import Any
 
 from pydantic import ValidationError
@@ -12,6 +17,10 @@ from .mock_provider import run_mock
 from .parser import parse_ai_json
 from .prompt import build_evaluation_prompts
 from .schemas import AnalysisMeta, AnalysisRequest, AnalysisResult
+
+# Bounded, TTL'd, content-addressed cache of completed evaluations.
+_result_cache: "OrderedDict[str, tuple[float, AnalysisResult]]" = OrderedDict()
+_cache_lock = threading.Lock()
 
 
 def _normalize_legacy_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -58,6 +67,8 @@ def _public_result_from_legacy(
             "top_priorities": data["top_priorities"],
             "feedback": data["overall_feedback"],
             "revision_guidance": data["revision_guidance"],
+            "dimension_evidence": data.get("dimension_evidence"),
+            "reference_check": data.get("reference_check"),
             "meta": AnalysisMeta(
                 provider=provider,
                 model=model,
@@ -65,6 +76,71 @@ def _public_result_from_legacy(
             ).model_dump(),
         }
     )
+
+
+def _request_fingerprint(request: AnalysisRequest, prompt_version: str, model: str) -> str:
+    """Stable identity for one evaluation request.
+
+    Covers every input that can change the verdict, plus the prompt version and
+    model, so a rubric or model change invalidates the cache automatically.
+    """
+    payload = json.dumps(
+        {
+            "topic": request.topic,
+            "audience": request.target_audience,
+            "transcript": request.transcript,
+            "reference": request.reference_content or "",
+            "prompt_version": prompt_version,
+            "model": model,
+            "temperature": os.getenv("AI_TEMPERATURE", "0.1"),
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _cache_get(key: str) -> AnalysisResult | None:
+    """Look up an identical earlier evaluation.
+
+    Keyed on the full content of the request, so a hit is by construction the
+    same question - this returns a previous answer to the same input, never a
+    stale answer to a changed one. Editing a single word of the transcript
+    changes the key and forces a fresh evaluation.
+
+    The main beneficiary is the retry button: re-running an unchanged session
+    otherwise costs another full inference call and another 10-30 s wait.
+    """
+    ttl = float(os.getenv("AI_CACHE_TTL_SECONDS", "3600"))
+    if ttl <= 0:
+        return None
+    with _cache_lock:
+        entry = _result_cache.get(key)
+        if entry is None:
+            return None
+        stored_at, result = entry
+        if time.time() - stored_at > ttl:
+            del _result_cache[key]
+            return None
+        _result_cache.move_to_end(key)
+        return result
+
+
+def _cache_put(key: str, result: AnalysisResult) -> None:
+    if float(os.getenv("AI_CACHE_TTL_SECONDS", "3600")) <= 0:
+        return
+    max_entries = int(os.getenv("AI_CACHE_MAX_ENTRIES", "32"))
+    with _cache_lock:
+        _result_cache[key] = (time.time(), result)
+        _result_cache.move_to_end(key)
+        while len(_result_cache) > max_entries:
+            _result_cache.popitem(last=False)
+
+
+def clear_cache() -> None:
+    """Drop every cached evaluation. Used by tests."""
+    with _cache_lock:
+        _result_cache.clear()
 
 
 def _validate_candidate(candidate: dict[str, Any]) -> CompactEvaluation:
@@ -96,6 +172,14 @@ def evaluate_explanation(request: AnalysisRequest) -> AnalysisResult:
     last_error: Exception | None = None
     model = os.getenv("CLOUDFLARE_MODEL", "@cf/qwen/qwen3-30b-a3b-fp8")
 
+    cache_key = _request_fingerprint(request, prompt_version, model)
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        marked = cached.model_copy(deep=True)
+        if marked.meta is not None:
+            marked.meta.cached = True
+        return marked
+
     for attempt in range(1, max_attempts + 1):
         retry_note = None
         if attempt > 1:
@@ -116,12 +200,14 @@ def evaluate_explanation(request: AnalysisRequest) -> AnalysisResult:
         if structured is not None:
             try:
                 evaluation = _validate_candidate(structured)
-                return _public_result_from_legacy(
+                result = _public_result_from_legacy(
                     evaluation,
                     provider="cloudflare",
                     model=model,
                     prompt_version=prompt_version,
                 )
+                _cache_put(cache_key, result)
+                return result
             except ValidationError as exc:
                 last_error = exc
                 continue
@@ -132,12 +218,14 @@ def evaluate_explanation(request: AnalysisRequest) -> AnalysisResult:
         try:
             parsed = parse_ai_json(raw)
             evaluation = _validate_candidate(parsed)
-            return _public_result_from_legacy(
+            result = _public_result_from_legacy(
                 evaluation,
                 provider="cloudflare",
                 model=model,
                 prompt_version=prompt_version,
             )
+            _cache_put(cache_key, result)
+            return result
         except (ValueError, ValidationError, TypeError) as exc:
             last_error = exc
             continue

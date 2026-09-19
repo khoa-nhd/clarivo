@@ -18,11 +18,39 @@ def local_scoring_enabled() -> bool:
     return _env_bool("LOCAL_SCORING_ENABLED", False)
 
 
+def _env_path(name: str, default: Path) -> Path:
+    """Resolve a directory from the environment, treating blank as unset.
+
+    ``os.getenv(name, default)`` returns the default only when the variable is
+    absent, not when it is present but empty. ``.env.example`` ships
+    ``LOCAL_CACHE_DIR=`` with no value, so the documented default was never
+    reached: the value became ``""``, and ``Path("").resolve()`` is the process
+    working directory. The OpenVINO compiled-model cache therefore landed
+    wherever the server happened to be started from - scattering ~23 MB of blobs
+    into the repository, and silently losing the cache altogether when that
+    directory was not writable (``create_core`` swallows the failure), which
+    costs a full model recompile on every single request.
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default.resolve()
+    return Path(raw.strip()).expanduser().resolve()
+
+
+def _cache_dir() -> Path:
+    cache_dir = _env_path(
+        "LOCAL_CACHE_DIR",
+        Path(__file__).resolve().parent.parent / "local_scoring" / "cache",
+    )
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
 def models_dir() -> Path:
-    configured = os.getenv("LOCAL_MODELS_DIR", "").strip()
-    if configured:
-        return Path(configured).expanduser().resolve()
-    return (Path(__file__).resolve().parent.parent / "local_scoring" / "models").resolve()
+    return _env_path(
+        "LOCAL_MODELS_DIR",
+        Path(__file__).resolve().parent.parent / "local_scoring" / "models",
+    )
 
 
 def _model_paths(base: Path) -> dict[str, Path]:
@@ -116,6 +144,12 @@ def _compact_audio(audio: dict[str, Any], elapsed: float) -> dict[str, Any]:
             "transcript_source": metrics.get("text_metric_source", "external_transcript"),
             "speech_state": metrics.get("speech_state"),
             "audio_status": metrics.get("audio_status"),
+            # How the speech/silence threshold was chosen. "unimodal_no_background"
+            # means the recording had no separable background lobe, which is the
+            # case where an N/A verdict needs explaining rather than just showing.
+            "vad_mode": metrics.get("vad_mode"),
+            "vad_speech_background_separation_db": metrics.get("vad_otsu_separation_db"),
+            "speech_threshold_dbfs": metrics.get("speech_threshold_dbfs"),
             "no_speech_detected": metrics.get("no_speech_detected"),
             "wpm": metrics.get("wpm"),
             "articulation_wpm": metrics.get("articulation_wpm"),
@@ -187,6 +221,10 @@ def _compact_vision(vision: dict[str, Any], elapsed: float) -> dict[str, Any]:
             # Phase 20 treats gesture as descriptive, not a universal numeric grade.
             "gesture_score": scores.get("gesture"),
             "duration_seconds": metrics.get("duration_seconds"),
+            # Browser WebM often carries no duration header; this says which
+            # evidence the reported duration came from.
+            "duration_source": metrics.get("duration_source"),
+            "sample_fps_effective": metrics.get("sample_fps_effective"),
             "forward_percent": metrics.get("forward_percent"),
             "visible_forward_percent": metrics.get("visible_forward_percent"),
             "direct_forward_percent": metrics.get("direct_forward_percent"),
@@ -239,13 +277,7 @@ def analyze_audio_file(*, audio_wav_bytes: bytes, transcript: str) -> dict[str, 
     from local_scoring.config import AudioConfig
 
     model_base = models_dir()
-    cache_dir = Path(
-        os.getenv(
-            "LOCAL_CACHE_DIR",
-            str(Path(__file__).resolve().parent.parent / "local_scoring" / "cache"),
-        )
-    ).resolve()
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = _cache_dir()
 
     started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="clarivo_audio_") as tmp:
@@ -276,13 +308,7 @@ def analyze_vision_file(*, video_bytes: bytes, video_suffix: str) -> dict[str, A
     paths = _model_paths(model_base)
     vision_device = _device_choice(os.getenv("LOCAL_VISION_DEVICE", "RECOMMENDED"), "vision")
     pose_device = _device_choice(os.getenv("LOCAL_POSE_DEVICE", "RECOMMENDED"), "pose")
-    cache_dir = Path(
-        os.getenv(
-            "LOCAL_CACHE_DIR",
-            str(Path(__file__).resolve().parent.parent / "local_scoring" / "cache"),
-        )
-    ).resolve()
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = _cache_dir()
 
     started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="clarivo_vision_") as tmp:
