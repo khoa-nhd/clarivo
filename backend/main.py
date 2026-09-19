@@ -205,6 +205,8 @@ async def transcribe(
         os.getenv("AI_PROVIDER", "mock"),
     ).strip().lower()
 
+    print("🔥 TRANSCRIPTION PROVIDER:", repr(provider))
+
     max_recording_seconds = int(os.getenv("MAX_RECORDING_SECONDS", "300"))
     if duration_seconds > max_recording_seconds + 5:
         raise HTTPException(
