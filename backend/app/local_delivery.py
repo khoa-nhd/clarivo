@@ -129,6 +129,11 @@ def capability_payload() -> dict[str, Any]:
         "vision_ready": vision_ready,
         "models_ready": vision_ready,  # backward compatibility with the previous UI
         "mode": mode,
+        # Published so the browser enforces the same ceilings the server does.
+        # They were duplicated as constants in the upload panel and had already
+        # drifted, so a file the server would have accepted was refused - and a
+        # file it would refuse was uploaded in full before failing.
+        "limits": upload_limits(),
     }
     if enabled_by_config and not (audio_ready and vision_ready):
         # Surface the reason per capability, so a deployment where one half
@@ -144,6 +149,23 @@ def capability_payload() -> dict[str, Any]:
     if enabled_by_config and not enabled:
         payload["configured_but_unavailable"] = True
     return payload
+
+
+#: Five minutes of phone or screen capture can easily reach several hundred MB,
+#: so the ceiling is generous. Uploads stream to disk, so a large file costs
+#: temporary disk space rather than server memory.
+DEFAULT_MAX_VIDEO_BYTES = 1_024_000_000
+DEFAULT_MAX_AUDIO_WAV_BYTES = 64_000_000
+
+
+def upload_limits() -> dict[str, Any]:
+    return {
+        "max_video_bytes": int(os.getenv("LOCAL_MAX_VIDEO_BYTES", str(DEFAULT_MAX_VIDEO_BYTES))),
+        "max_audio_wav_bytes": int(
+            os.getenv("LOCAL_MAX_AUDIO_WAV_BYTES", str(DEFAULT_MAX_AUDIO_WAV_BYTES))
+        ),
+        "max_recording_seconds": int(os.getenv("MAX_RECORDING_SECONDS", "300")),
+    }
 
 
 def _device_choice(requested: str, kind: str) -> str:
@@ -334,7 +356,12 @@ def _compact_vision(vision: dict[str, Any], elapsed: float) -> dict[str, Any]:
         },
     }
 
-def analyze_audio_file(*, audio_wav_bytes: bytes, transcript: str) -> dict[str, Any]:
+def analyze_audio_path(*, audio_path: Path, transcript: str) -> dict[str, Any]:
+    """Analyse a WAV already on disk.
+
+    Path-based so the HTTP layer can stream a large upload straight to a temp
+    file rather than holding the whole recording in memory.
+    """
     if not local_scoring_enabled():
         raise RuntimeError("Local audio analysis is disabled. Set LOCAL_SCORING_ENABLED=true on the local backend.")
 
@@ -346,22 +373,33 @@ def analyze_audio_file(*, audio_wav_bytes: bytes, transcript: str) -> dict[str, 
     cache_dir = _cache_dir()
 
     started = time.perf_counter()
-    with tempfile.TemporaryDirectory(prefix="clarivo_audio_") as tmp:
-        audio_path = Path(tmp) / "audio.wav"
-        audio_path.write_bytes(audio_wav_bytes)
-        audio = analyze_audio(
-            audio_path,
-            whisper_model_dir=model_base / "unused-web-transcript",
-            device="CPU",
-            language="en",
-            cache_dir=cache_dir,
-            transcript=transcript,
-            cfg=AudioConfig(),
-        )
+    audio = analyze_audio(
+        audio_path,
+        whisper_model_dir=model_base / "unused-web-transcript",
+        device="CPU",
+        language="en",
+        cache_dir=cache_dir,
+        transcript=transcript,
+        cfg=AudioConfig(),
+    )
     return _compact_audio(audio, time.perf_counter() - started)
 
 
-def analyze_vision_file(*, video_bytes: bytes, video_suffix: str) -> dict[str, Any]:
+def analyze_audio_file(*, audio_wav_bytes: bytes, transcript: str) -> dict[str, Any]:
+    """In-memory variant, kept for callers that already hold the bytes."""
+    with tempfile.TemporaryDirectory(prefix="clarivo_audio_") as tmp:
+        audio_path = Path(tmp) / "audio.wav"
+        audio_path.write_bytes(audio_wav_bytes)
+        return analyze_audio_path(audio_path=audio_path, transcript=transcript)
+
+
+def analyze_vision_path(*, video_path: Path) -> dict[str, Any]:
+    """Analyse a video already on disk.
+
+    Path-based so a multi-hundred-megabyte upload can be streamed to a temp
+    file instead of being buffered whole in memory. The analyzer only ever
+    decodes the sampled frames, so file size costs disk, not RAM.
+    """
     if not local_scoring_enabled():
         raise RuntimeError("Local vision analysis is disabled. Set LOCAL_SCORING_ENABLED=true on the local backend.")
     if not models_ready():
@@ -370,30 +408,34 @@ def analyze_vision_file(*, video_bytes: bytes, video_suffix: str) -> dict[str, A
     from local_scoring.config import VisionConfig
     from local_scoring.vision_analyzer import analyze_video
 
-    model_base = models_dir()
-    paths = _model_paths(model_base)
+    paths = _model_paths(models_dir())
     vision_device = _device_choice(os.getenv("LOCAL_VISION_DEVICE", "RECOMMENDED"), "vision")
     pose_device = _device_choice(os.getenv("LOCAL_POSE_DEVICE", "RECOMMENDED"), "pose")
     cache_dir = _cache_dir()
 
     started = time.perf_counter()
+    vision = analyze_video(
+        video_path,
+        face_model=paths["face"],
+        head_pose_model=paths["head"],
+        landmarks_model=paths["landmarks"],
+        gaze_model=paths["gaze"],
+        pose_model_dir=paths["pose"],
+        device=vision_device,
+        pose_device=pose_device,
+        cache_dir=cache_dir,
+        cfg=VisionConfig(sample_fps=float(os.getenv("LOCAL_SAMPLE_FPS", "2.0"))),
+    )
+    return _compact_vision(vision, time.perf_counter() - started)
+
+
+def analyze_vision_file(*, video_bytes: bytes, video_suffix: str) -> dict[str, Any]:
+    """In-memory variant, kept for callers that already hold the bytes."""
     with tempfile.TemporaryDirectory(prefix="clarivo_vision_") as tmp:
         suffix = video_suffix if video_suffix.startswith(".") else f".{video_suffix}"
         video_path = Path(tmp) / f"video{suffix or '.webm'}"
         video_path.write_bytes(video_bytes)
-        vision = analyze_video(
-            video_path,
-            face_model=paths["face"],
-            head_pose_model=paths["head"],
-            landmarks_model=paths["landmarks"],
-            gaze_model=paths["gaze"],
-            pose_model_dir=paths["pose"],
-            device=vision_device,
-            pose_device=pose_device,
-            cache_dir=cache_dir,
-            cfg=VisionConfig(sample_fps=float(os.getenv("LOCAL_SAMPLE_FPS", "2.0"))),
-        )
-    return _compact_vision(vision, time.perf_counter() - started)
+        return analyze_vision_path(video_path=video_path)
 
 
 def analyze_delivery_files(

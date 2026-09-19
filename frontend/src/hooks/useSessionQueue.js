@@ -173,6 +173,7 @@ export function useSessionQueue() {
   const localVisionEnabled = visionAvailable(backendHealth)
   const localDeliveryEnabled = localAudioEnabled || localVisionEnabled
   const backendUnreachable = Boolean(backendHealth?.delivery_analysis?.unreachable)
+  const uploadLimits = backendHealth?.delivery_analysis?.limits ?? null
 
   useEffect(() => {
     if (inFlightIdRef.current) return
@@ -542,6 +543,7 @@ export function useSessionQueue() {
     localAudioEnabled,
     localVisionEnabled,
     backendUnreachable,
+    uploadLimits,
     refreshHealth,
     addSession,
     setActiveId,

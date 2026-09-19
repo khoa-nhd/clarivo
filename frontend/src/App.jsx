@@ -38,6 +38,7 @@ export default function App() {
             onSubmit={queue.addSession}
             queueCount={queue.counts.queued + queue.counts.processing}
             visionEnabled={queue.localVisionEnabled}
+            uploadLimits={queue.uploadLimits}
           />
         )}
 

@@ -1,6 +1,7 @@
 """Clarivo FastAPI application used locally and by Vercel."""
 
 import os
+import tempfile
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -27,10 +28,11 @@ from app.schemas import (
     TranscriptionResult,
 )
 from app.local_delivery import (
-    analyze_audio_file,
+    analyze_audio_path,
     analyze_delivery_files,
-    analyze_vision_file,
+    analyze_vision_path,
     capability_payload,
+    upload_limits,
 )
 
 app = FastAPI(title="Clarivo API", version="1.4.0")
@@ -53,6 +55,66 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
+
+
+#: Uploads are copied to disk a megabyte at a time. Reading the whole body with
+#: `await file.read()` held an entire recording in memory - fine for the old
+#: 80 MB ceiling, ruinous at the sizes a five-minute capture actually reaches.
+UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+
+async def _stream_upload(upload: UploadFile, destination: Path, max_bytes: int, label: str) -> int:
+    """Copy an upload to disk, enforcing the size cap as the bytes arrive.
+
+    Checking during the copy means an oversized file is rejected part way
+    through instead of after the server has already buffered all of it.
+    """
+    total = 0
+    with destination.open("wb") as handle:
+        while True:
+            chunk = await upload.read(UPLOAD_CHUNK_BYTES)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        f"{label} is larger than the {max_bytes // (1024 * 1024)} MB limit "
+                        "this backend accepts. Raise LOCAL_MAX_VIDEO_BYTES, or record a shorter clip."
+                    ),
+                )
+            handle.write(chunk)
+    if total == 0:
+        raise HTTPException(status_code=400, detail=f"{label} is empty.")
+    return total
+
+
+
+def _combine_delivery(audio: dict, vision: dict) -> dict:
+    """Merge the two compact payloads the way the legacy combined route did."""
+    priorities: list[str] = []
+    for item in [*(audio.get("top_priorities") or []), *(vision.get("top_priorities") or [])]:
+        if item not in priorities:
+            priorities.append(item)
+    return {
+        "schema_version": "clarivo-web-delivery-v11",
+        "voice_score": audio.get("voice_score"),
+        "visual_score": vision.get("visual_score"),
+        "voice": audio.get("voice"),
+        "visual": vision.get("visual"),
+        "top_priorities": priorities[:3],
+        "meta": {
+            "engine": "Clarivo Phase 20 local scoring",
+            "analysis_seconds": round(
+                float(audio.get("meta", {}).get("analysis_seconds") or 0)
+                + float(vision.get("meta", {}).get("analysis_seconds") or 0),
+                2,
+            ),
+            "audio_confidence": audio.get("meta", {}).get("audio_confidence"),
+            "vision_confidence": vision.get("meta", {}).get("vision_confidence"),
+        },
+    }
 
 
 def _local_unavailable_detail(capability: dict, kind: str) -> str:
@@ -328,24 +390,23 @@ async def analyze_audio_delivery(
     if len(transcript.strip()) < 10:
         raise HTTPException(status_code=400, detail="A transcript is required for audio analysis.")
 
-    max_audio = int(os.getenv("LOCAL_MAX_AUDIO_WAV_BYTES", "16000000"))
-    audio_data = await audio_wav.read(max_audio + 1)
-    if not audio_data:
-        raise HTTPException(status_code=400, detail="Audio recording is required for audio analysis.")
-    if len(audio_data) > max_audio:
-        raise HTTPException(status_code=413, detail="Local WAV recording is too large.")
-
-    try:
-        return await run_in_threadpool(
-            analyze_audio_file,
-            audio_wav_bytes=audio_data,
-            transcript=transcript,
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Local audio analysis failed: {type(exc).__name__}: {exc}",
-        ) from exc
+    max_audio = upload_limits()["max_audio_wav_bytes"]
+    with tempfile.TemporaryDirectory(prefix="clarivo_audio_") as tmp:
+        audio_path = Path(tmp) / "audio.wav"
+        await _stream_upload(audio_wav, audio_path, max_audio, "The audio recording")
+        try:
+            return await run_in_threadpool(
+                analyze_audio_path,
+                audio_path=audio_path,
+                transcript=transcript,
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Local audio analysis failed: {type(exc).__name__}: {exc}",
+            ) from exc
 
 
 @app.post("/api/analyze/vision")
@@ -364,35 +425,30 @@ async def analyze_visual_delivery(
     if duration_seconds > max_seconds + 5:
         raise HTTPException(status_code=413, detail="Recording is longer than the local analysis limit.")
 
-    max_video = int(os.getenv("LOCAL_MAX_VIDEO_BYTES", "80000000"))
-    video_data = await video.read(max_video + 1)
-    if not video_data:
-        raise HTTPException(status_code=400, detail="Camera video is required for visual analysis.")
-    if len(video_data) > max_video:
-        raise HTTPException(status_code=413, detail="Local camera recording is too large.")
-
+    max_video = upload_limits()["max_video_bytes"]
     filename = video.filename or "camera.webm"
     suffix = Path(filename).suffix or ".webm"
-    try:
-        return await run_in_threadpool(
-            analyze_vision_file,
-            video_bytes=video_data,
-            video_suffix=suffix,
-        )
-    except Exception as exc:
-        message = str(exc)
-        lowered = message.lower()
-        if "models are missing" in lowered or "models are not ready" in lowered:
-            raise HTTPException(status_code=503, detail=message) from exc
-        if "could not open video" in lowered or ("video" in lowered and "open" in lowered):
+    with tempfile.TemporaryDirectory(prefix="clarivo_vision_") as tmp:
+        video_path = Path(tmp) / f"video{suffix}"
+        await _stream_upload(video, video_path, max_video, "The camera recording")
+        try:
+            return await run_in_threadpool(analyze_vision_path, video_path=video_path)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            message = str(exc)
+            lowered = message.lower()
+            if "models are missing" in lowered or "models are not ready" in lowered:
+                raise HTTPException(status_code=503, detail=message) from exc
+            if "could not open video" in lowered or ("video" in lowered and "open" in lowered):
+                raise HTTPException(
+                    status_code=422,
+                    detail="Clarivo could not decode this camera recording. Try Chrome/Edge and record again.",
+                ) from exc
             raise HTTPException(
-                status_code=422,
-                detail="Clarivo could not decode this browser camera recording locally. Try Chrome/Edge and record again.",
+                status_code=500,
+                detail=f"Local visual analysis failed: {type(exc).__name__}: {message}",
             ) from exc
-        raise HTTPException(
-            status_code=500,
-            detail=f"Local visual analysis failed: {type(exc).__name__}: {message}",
-        ) from exc
 
 
 @app.post("/api/analyze/delivery")
@@ -414,40 +470,33 @@ async def analyze_delivery(
     if len(transcript.strip()) < 10:
         raise HTTPException(status_code=400, detail="A transcript is required for delivery analysis.")
 
-    max_audio = int(os.getenv("LOCAL_MAX_AUDIO_WAV_BYTES", "16000000"))
-    max_video = int(os.getenv("LOCAL_MAX_VIDEO_BYTES", "80000000"))
-    audio_data = await audio_wav.read(max_audio + 1)
-    video_data = await video.read(max_video + 1)
-    if not audio_data or not video_data:
-        raise HTTPException(status_code=400, detail="Audio and camera video are both required for delivery analysis.")
-    if len(audio_data) > max_audio:
-        raise HTTPException(status_code=413, detail="Local WAV recording is too large.")
-    if len(video_data) > max_video:
-        raise HTTPException(status_code=413, detail="Local camera recording is too large.")
-
+    limits = upload_limits()
     filename = video.filename or "camera.webm"
     suffix = Path(filename).suffix or ".webm"
-    try:
-        return await run_in_threadpool(
-            analyze_delivery_files,
-            audio_wav_bytes=audio_data,
-            video_bytes=video_data,
-            video_suffix=suffix,
-            transcript=transcript,
-        )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        message = str(exc)
-        lowered = message.lower()
-        if "models are missing" in lowered or "models are not ready" in lowered:
-            raise HTTPException(status_code=503, detail=message) from exc
-        if "could not open video" in lowered or "video" in lowered and "open" in lowered:
+    with tempfile.TemporaryDirectory(prefix="clarivo_delivery_") as tmp:
+        audio_path = Path(tmp) / "audio.wav"
+        video_path = Path(tmp) / f"video{suffix}"
+        await _stream_upload(audio_wav, audio_path, limits["max_audio_wav_bytes"], "The audio recording")
+        await _stream_upload(video, video_path, limits["max_video_bytes"], "The camera recording")
+        try:
+            audio_result = await run_in_threadpool(
+                analyze_audio_path, audio_path=audio_path, transcript=transcript
+            )
+            vision_result = await run_in_threadpool(analyze_vision_path, video_path=video_path)
+            return _combine_delivery(audio_result, vision_result)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            message = str(exc)
+            lowered = message.lower()
+            if "models are missing" in lowered or "models are not ready" in lowered:
+                raise HTTPException(status_code=503, detail=message) from exc
+            if "could not open video" in lowered or ("video" in lowered and "open" in lowered):
+                raise HTTPException(
+                    status_code=422,
+                    detail="Clarivo could not decode this camera recording. Try Chrome/Edge and record again.",
+                ) from exc
             raise HTTPException(
-                status_code=422,
-                detail="Clarivo could not decode this browser camera recording locally. Try Chrome/Edge and record again.",
+                status_code=500,
+                detail=f"Local delivery analysis failed: {type(exc).__name__}: {message}",
             ) from exc
-        raise HTTPException(
-            status_code=500,
-            detail=f"Local delivery analysis failed: {type(exc).__name__}: {message}",
-        ) from exc

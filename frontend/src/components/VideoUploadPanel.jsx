@@ -2,8 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import { transcribeAudio } from '../services/api.js'
 import { compressedAudioToWav } from '../services/audioProcessing.js'
 
-const MAX_RECORDING_SECONDS = 5 * 60
-const MAX_UPLOAD_VIDEO_BYTES = 80 * 1024 * 1024 // mirrors backend LOCAL_MAX_VIDEO_BYTES
+// Fallbacks only. The real ceilings come from /api/health so the browser and
+// the server cannot disagree - they already had, which is why an upload the
+// server would have accepted was refused here at 80 MB.
+const FALLBACK_MAX_RECORDING_SECONDS = 5 * 60
+const FALLBACK_MAX_UPLOAD_VIDEO_BYTES = 1_024_000_000
 const ACCEPTED_EXTENSIONS = /\.(mp4|webm|mov|m4v)$/i
 
 function formatDuration(totalSeconds) {
@@ -43,7 +46,10 @@ export default function VideoUploadPanel({
   onMediaReady,
   resetKey,
   visionEnabled = true,
+  limits = null,
 }) {
+  const maxVideoBytes = Number(limits?.max_video_bytes) || FALLBACK_MAX_UPLOAD_VIDEO_BYTES
+  const maxRecordingSeconds = Number(limits?.max_recording_seconds) || FALLBACK_MAX_RECORDING_SECONDS
   const inputRef = useRef(null)
   const previewUrlRef = useRef('')
 
@@ -91,8 +97,8 @@ export default function VideoUploadPanel({
       setError('Please choose a video file (mp4, webm, or mov).')
       return
     }
-    if (file.size > MAX_UPLOAD_VIDEO_BYTES) {
-      setError(`This file is ${formatBytes(file.size)}, over the ${formatBytes(MAX_UPLOAD_VIDEO_BYTES)} limit.`)
+    if (file.size > maxVideoBytes) {
+      setError(`This file is ${formatBytes(file.size)}, over the ${formatBytes(maxVideoBytes)} this backend accepts.`)
       return
     }
 
@@ -101,8 +107,8 @@ export default function VideoUploadPanel({
     try {
       const rawDuration = await readVideoDuration(file)
       const durationSeconds = Math.max(1, Math.round(rawDuration))
-      if (durationSeconds > MAX_RECORDING_SECONDS) {
-        throw new Error(`This video is longer than ${Math.round(MAX_RECORDING_SECONDS / 60)} minutes. Please upload a shorter clip.`)
+      if (durationSeconds > maxRecordingSeconds) {
+        throw new Error(`This video is longer than ${Math.round(maxRecordingSeconds / 60)} minutes. Please upload a shorter clip.`)
       }
 
       setNotice('Extracting audio…')
