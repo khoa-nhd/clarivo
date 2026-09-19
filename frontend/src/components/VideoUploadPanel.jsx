@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { transcribeAudio } from '../services/api.js'
+import { HOSTED_UPLOAD_LIMIT_BYTES, isHostedApi, transcribeAudio } from '../services/api.js'
 import { compressedAudioToWav } from '../services/audioProcessing.js'
 
 // Fallbacks only. The real ceilings come from /api/health so the browser and
@@ -48,7 +48,15 @@ export default function VideoUploadPanel({
   visionEnabled = true,
   limits = null,
 }) {
-  const maxVideoBytes = Number(limits?.max_video_bytes) || FALLBACK_MAX_UPLOAD_VIDEO_BYTES
+  // Two ceilings apply. The backend publishes its own, but a hosted deployment
+  // also sits behind a platform request-body cap it cannot raise, and that one
+  // rejects the upload before any application code runs. Enforce the smaller of
+  // the two at file-selection time so the user is told immediately rather than
+  // after the transcript step has already run.
+  const serverMaxVideoBytes = Number(limits?.max_video_bytes) || FALLBACK_MAX_UPLOAD_VIDEO_BYTES
+  const maxVideoBytes = isHostedApi()
+    ? Math.min(serverMaxVideoBytes, HOSTED_UPLOAD_LIMIT_BYTES)
+    : serverMaxVideoBytes
   const maxRecordingSeconds = Number(limits?.max_recording_seconds) || FALLBACK_MAX_RECORDING_SECONDS
   const inputRef = useRef(null)
   const previewUrlRef = useRef('')
@@ -98,7 +106,11 @@ export default function VideoUploadPanel({
       return
     }
     if (file.size > maxVideoBytes) {
-      setError(`This file is ${formatBytes(file.size)}, over the ${formatBytes(maxVideoBytes)} this backend accepts.`)
+      setError(
+        isHostedApi() && maxVideoBytes === HOSTED_UPLOAD_LIMIT_BYTES
+          ? `This file is ${formatBytes(file.size)}. The hosted backend accepts at most ${formatBytes(maxVideoBytes)} per upload, so visual analysis of a full recording needs Clarivo running locally.`
+          : `This file is ${formatBytes(file.size)}, over the ${formatBytes(maxVideoBytes)} this backend accepts.`,
+      )
       return
     }
 
