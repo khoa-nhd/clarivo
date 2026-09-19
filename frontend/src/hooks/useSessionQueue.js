@@ -79,16 +79,86 @@ function replaceChallengeOfType(currentChallenges, answeredChallenge, nextChalle
     .sort((a, b) => (order[a?.type] ?? 9) - (order[b?.type] ?? 9))
 }
 
+function audioAvailable(health) {
+  const delivery = health?.delivery_analysis
+  return Boolean(delivery?.enabled && (delivery?.audio_ready ?? true))
+}
+
+function visionAvailable(health) {
+  const delivery = health?.delivery_analysis
+  return Boolean(delivery?.enabled && (delivery?.vision_ready ?? delivery?.models_ready))
+}
+
 export function useSessionQueue() {
   const [sessions, setSessions] = useState(loadSessions)
   const [activeId, setActiveId] = useState(() => loadSessions()[0]?.id ?? null)
   const [backendHealth, setBackendHealth] = useState(null)
   const inFlightIdRef = useRef(null)
   const sessionsRef = useRef(sessions)
+  const backendHealthRef = useRef(null)
 
-  useEffect(() => {
-    checkHealth().then(setBackendHealth).catch(() => setBackendHealth({ delivery_analysis: { enabled: false } }))
+  const applyHealth = useCallback((health) => {
+    backendHealthRef.current = health
+    setBackendHealth(health)
+    return health
   }, [])
+
+  // Re-read the backend capabilities. Returns the freshest value available.
+  const refreshHealth = useCallback(async () => {
+    try {
+      return applyHealth(await checkHealth())
+    } catch {
+      // Do not downgrade a previously successful reading because of one blip;
+      // that would flap the whole delivery UI off and back on.
+      if (backendHealthRef.current) return backendHealthRef.current
+      return applyHealth({ delivery_analysis: { enabled: false, unreachable: true } })
+    }
+  }, [applyHealth])
+
+  // The capability probe used to run exactly once, with no retry, and cache a
+  // permanent "disabled" result on any failure. Frontend and backend start
+  // together and the dev server is ready seconds before uvicorn finishes
+  // booting, so losing that race left the app believing local voice/visual
+  // analysis did not exist - stamping every session "Voice unavailable /
+  // Visual unavailable" until the user manually reloaded the page.
+  useEffect(() => {
+    let cancelled = false
+    let timer = null
+    let attempt = 0
+    const backoffMs = [400, 800, 1600, 3000, 5000]
+
+    const probe = async () => {
+      if (cancelled) return
+      try {
+        applyHealth(await checkHealth())
+      } catch {
+        if (cancelled) return
+        if (!backendHealthRef.current) {
+          applyHealth({ delivery_analysis: { enabled: false, unreachable: true } })
+        }
+        if (attempt < 8) {
+          const delay = backoffMs[Math.min(attempt, backoffMs.length - 1)]
+          attempt += 1
+          timer = setTimeout(probe, delay)
+        }
+      }
+    }
+
+    probe()
+    return () => { cancelled = true; if (timer) clearTimeout(timer) }
+  }, [applyHealth])
+
+  // Re-probe when the user returns to the tab, which is when a backend that was
+  // restarted in the meantime would otherwise still look absent.
+  useEffect(() => {
+    const onWake = () => { if (document.visibilityState !== 'hidden') refreshHealth() }
+    window.addEventListener('focus', onWake)
+    document.addEventListener('visibilitychange', onWake)
+    return () => {
+      window.removeEventListener('focus', onWake)
+      document.removeEventListener('visibilitychange', onWake)
+    }
+  }, [refreshHealth])
 
   useEffect(() => {
     sessionsRef.current = sessions
@@ -99,15 +169,10 @@ export function useSessionQueue() {
     setSessions((current) => current.map((session) => session.id === id ? { ...session, ...patch } : session))
   }, [])
 
-  const localAudioEnabled = Boolean(
-    backendHealth?.delivery_analysis?.enabled &&
-    (backendHealth?.delivery_analysis?.audio_ready ?? true),
-  )
-  const localVisionEnabled = Boolean(
-    backendHealth?.delivery_analysis?.enabled &&
-    (backendHealth?.delivery_analysis?.vision_ready ?? backendHealth?.delivery_analysis?.models_ready),
-  )
+  const localAudioEnabled = audioAvailable(backendHealth)
+  const localVisionEnabled = visionAvailable(backendHealth)
   const localDeliveryEnabled = localAudioEnabled || localVisionEnabled
+  const backendUnreachable = Boolean(backendHealth?.delivery_analysis?.unreachable)
 
   useEffect(() => {
     if (inFlightIdRef.current) return
@@ -115,23 +180,38 @@ export function useSessionQueue() {
     if (!next) return
 
     inFlightIdRef.current = next.id
-    patchSession(next.id, {
-      status: 'processing',
-      startedAt: new Date().toISOString(),
-      error: null,
-      deliveryError: null,
-      analysisState: {
-        content: 'processing',
-        audio: next.audio && localAudioEnabled ? 'processing' : 'unavailable',
-        vision: next.video && localVisionEnabled ? 'processing' : 'unavailable',
-      },
-    })
 
     ;(async () => {
+      // If this session carries recorded media but local analysis currently
+      // looks unavailable, that may just be a stale snapshot from before the
+      // backend finished booting. Confirm once instead of permanently marking
+      // the session unavailable.
+      let health = backendHealthRef.current
+      const wantsLocal = Boolean(next.audio || next.video)
+      const needsAudio = Boolean(next.audio) && !audioAvailable(health)
+      const needsVision = Boolean(next.video) && !visionAvailable(health)
+      if (wantsLocal && (needsAudio || needsVision)) {
+        health = await refreshHealth()
+      }
+      const audioEnabled = audioAvailable(health)
+      const visionEnabled = visionAvailable(health)
+
+      patchSession(next.id, {
+        status: 'processing',
+        startedAt: new Date().toISOString(),
+        error: null,
+        deliveryError: null,
+        analysisState: {
+          content: 'processing',
+          audio: next.audio && audioEnabled ? 'processing' : 'unavailable',
+          vision: next.video && visionEnabled ? 'processing' : 'unavailable',
+        },
+      })
+
       let audioMedia = null
       let videoMedia = null
-      if (next.audio && localAudioEnabled) audioMedia = await getSessionAudio(next.id).catch(() => null)
-      if (next.video && localVisionEnabled) videoMedia = await getSessionVideo(next.id).catch(() => null)
+      if (next.audio && audioEnabled) audioMedia = await getSessionAudio(next.id).catch(() => null)
+      if (next.video && visionEnabled) videoMedia = await getSessionVideo(next.id).catch(() => null)
 
       const contentPromise = analyzeSession(next)
       const audioPromise = audioMedia?.blob
@@ -241,7 +321,7 @@ export function useSessionQueue() {
         inFlightIdRef.current = null
         setSessions((current) => [...current])
       })
-  }, [sessions, patchSession, localAudioEnabled, localVisionEnabled])
+  }, [sessions, patchSession, refreshHealth, localAudioEnabled, localVisionEnabled])
 
   const addSession = useCallback((draft) => {
     const session = {
@@ -461,6 +541,8 @@ export function useSessionQueue() {
     localDeliveryEnabled,
     localAudioEnabled,
     localVisionEnabled,
+    backendUnreachable,
+    refreshHealth,
     addSession,
     setActiveId,
     retrySession,

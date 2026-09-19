@@ -1,0 +1,37 @@
+# Optional: enables local VOICE analysis on the public Vercel backend.
+#
+# Vercel builds from backend/requirements.txt, so to use this you append these
+# three lines to that file - Vercel does not read this file directly. It is kept
+# separate so the default serverless bundle stays small (~20 MB) for anyone who
+# does not want the voice feature.
+#
+# Why only voice, and not visual:
+#   The voice path needs no OpenVINO at all. On the web, the transcript comes
+#   from Cloudflare Whisper, so local ASR never runs and the analyzer is pure
+#   NumPy/librosa DSP. Visual analysis needs opencv + openvino + ultralytics
+#   (+ torch), which is ~1.7 GB, plus ~58 MB of model weights.
+#
+# Measured on this project:
+#   requirements.txt alone ................  ~20 MB   (well under the limit)
+#   + these three lines ................... ~434 MB   (Python limit is 500 MB)
+#   + the full local stack ................ ~1.7 GB   (needs Large Functions beta)
+#
+# The hard blocker for VIDEO is not size, it is Vercel's 4.5 MB request body
+# limit: a camera recording cannot reach the function at all. Audio can, but
+# only up to about 2 min 20 s - see the note below.
+#
+# Setup:
+#   1. Append these lines to backend/requirements.txt
+#   2. Set LOCAL_SCORING_ENABLED=true in the Vercel backend project
+#   3. Redeploy, then confirm /api/health shows:
+#        "audio_ready": true, "vision_ready": false
+#
+# Recording length limit:
+#   The browser uploads 16 kHz mono 16-bit WAV = 32 KB per second.
+#   4.5 MB / 32 KB/s = about 140 seconds. Longer recordings are rejected by
+#   Vercel with 413 before reaching the function, so lower MAX_RECORDING_SECONDS
+#   to 140 if you turn this on, otherwise users hit a confusing upload failure.
+
+numpy>=1.26
+librosa>=0.10.2
+soundfile>=0.12.1

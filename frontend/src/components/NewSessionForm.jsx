@@ -16,6 +16,9 @@ function loadTopicLibrary() {
   return topicLibrary
 }
 
+// Mirrors MAX_REFERENCE_CHARS on the backend, which returns 413 above it.
+const REFERENCE_CHAR_LIMIT = 20000
+
 export default function NewSessionForm({ onSubmit, queueCount, visionEnabled = true }) {
   const [selectedProfile, setSelectedProfile] = useState(null)
   const [topic, setTopic] = useState('')
@@ -23,6 +26,9 @@ export default function NewSessionForm({ onSubmit, queueCount, visionEnabled = t
   const [transcript, setTranscript] = useState('')
   const [referenceContent, setReferenceContent] = useState('')
   const [showReference, setShowReference] = useState(false)
+  // Whether the current reference text came from the Topic Library rather than
+  // from the user, so the UI can say where it is from and offer to restore it.
+  const [referenceFromLibrary, setReferenceFromLibrary] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
   const [isTranscribing, setIsTranscribing] = useState(false)
   const [mediaDraft, setMediaDraft] = useState(null)
@@ -37,14 +43,32 @@ export default function NewSessionForm({ onSubmit, queueCount, visionEnabled = t
     return value ? value.split(/\s+/).length : 0
   }, [transcript])
 
+  const referenceWordCount = useMemo(() => {
+    const value = referenceContent.trim()
+    return value ? value.split(/\s+/).length : 0
+  }, [referenceContent])
+
+  // The backend rejects anything longer (MAX_REFERENCE_CHARS), so warn before
+  // the user loses a long paste to a 413.
+  const referenceTooLong = referenceContent.length > REFERENCE_CHAR_LIMIT
+
+  const libraryReference = selectedProfile && selectedProfile.id !== 'custom'
+    ? (selectedProfile.referenceContent || '')
+    : ''
+  const referenceEdited = Boolean(libraryReference) && referenceContent !== libraryReference
+
   const busy = isRecording || isTranscribing
-  const canSubmit = !busy && topic.trim().length >= 2 && transcript.trim().length >= 20
+  const canSubmit = !busy && topic.trim().length >= 2 && transcript.trim().length >= 20 && !referenceTooLong
 
   function chooseProfile(profile) {
     setSelectedProfile(profile)
     setTopic(profile.title)
     setReferenceContent(profile.referenceContent)
     setTargetAudience(profile.recommendedAudience)
+    setReferenceFromLibrary(true)
+    // Library topics ship their own reference material, and it is what the
+    // evaluator grades the explanation against. Keep it collapsed so the form
+    // stays short, but the summary line below always shows that it is there.
     setShowReference(false)
   }
 
@@ -53,7 +77,13 @@ export default function NewSessionForm({ onSubmit, queueCount, visionEnabled = t
     setTopic('')
     setReferenceContent('')
     setTargetAudience('Beginner')
+    setReferenceFromLibrary(false)
     setShowReference(false)
+  }
+
+  function restoreLibraryReference() {
+    if (!libraryReference) return
+    setReferenceContent(libraryReference)
   }
 
   async function refreshTopics() {
@@ -119,6 +149,7 @@ export default function NewSessionForm({ onSubmit, queueCount, visionEnabled = t
     setTranscript('')
     setReferenceContent('')
     setShowReference(false)
+    setReferenceFromLibrary(false)
     setMediaDraft(null)
     setRecorderResetKey((value) => value + 1)
   }
@@ -263,24 +294,70 @@ export default function NewSessionForm({ onSubmit, queueCount, visionEnabled = t
           <div className="audio-ready-note"><span>✓</span><div><strong>Recording ready</strong></div></div>
         )}
 
-        {selectedProfile?.id === 'custom' && (
-          <div className="optional-block">
-            <button type="button" className="text-button" onClick={() => setShowReference((value) => !value)}>
-              {showReference ? '− Hide' : '+ Add'} reference content
-            </button>
-            {showReference && (
-              <label className="field compact-field">
-                <span>Reference content</span>
-                <textarea
-                  className="compact-textarea"
-                  value={referenceContent}
-                  onChange={(event) => setReferenceContent(event.target.value)}
-                  placeholder="Add key facts or expected content."
-                />
-              </label>
+        {/* Reference content is the material the evaluator grades the
+            explanation against: it drives correctness and completeness, and it
+            is what the report's "Checked against your reference" section
+            compares. It used to render only for a custom topic, so anyone using
+            a Topic Library topic could neither see nor edit the reference that
+            was being applied to their score. It is now available for every
+            topic. */}
+        <div className="optional-block reference-block">
+          <button
+            type="button"
+            className="text-button"
+            onClick={() => setShowReference((value) => !value)}
+            aria-expanded={showReference}
+          >
+            {showReference ? '−' : '+'} Reference content
+            {referenceWordCount > 0 && (
+              <span className="reference-badge">{referenceWordCount} words</span>
             )}
-          </div>
-        )}
+          </button>
+
+          {!showReference && (
+            <p className="reference-summary">
+              {referenceWordCount > 0
+                ? (referenceFromLibrary && !referenceEdited
+                    ? 'Using the reference material from this Topic Library topic. The evaluator checks your explanation against it.'
+                    : 'Your reference material will be used to check accuracy and completeness.')
+                : 'Optional. Paste notes, a definition, or source material and the evaluator will check your explanation against it.'}
+            </p>
+          )}
+
+          {showReference && (
+            <label className="field compact-field">
+              <div className="field-row">
+                <span>Reference content</span>
+                <span className={referenceTooLong ? 'reference-count over' : 'reference-count'}>
+                  {referenceContent.length.toLocaleString()} / {REFERENCE_CHAR_LIMIT.toLocaleString()}
+                </span>
+              </div>
+              <textarea
+                className="compact-textarea reference-textarea"
+                value={referenceContent}
+                onChange={(event) => setReferenceContent(event.target.value)}
+                placeholder="Paste the notes, definition, or source material your explanation should match."
+                disabled={busy}
+              />
+              <div className="reference-actions">
+                {referenceTooLong ? (
+                  <span className="reference-error">
+                    Too long by {(referenceContent.length - REFERENCE_CHAR_LIMIT).toLocaleString()} characters. Trim it before submitting.
+                  </span>
+                ) : (
+                  <span className="reference-hint">
+                    Leave empty and the evaluator falls back to general knowledge.
+                  </span>
+                )}
+                {referenceEdited && (
+                  <button type="button" className="text-button" onClick={restoreLibraryReference}>
+                    Restore library reference
+                  </button>
+                )}
+              </div>
+            </label>
+          )}
+        </div>
 
         <div className="form-footer">
           <div className="form-hint">

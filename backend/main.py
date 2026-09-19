@@ -55,6 +55,39 @@ app.add_middleware(
 )
 
 
+def _local_unavailable_detail(capability: dict, kind: str) -> str:
+    """Explain *why* local analysis is unavailable, without leaking internals.
+
+    Three different situations used to produce the same opaque message, or - when
+    the feature was switched on for a deployment that cannot run it - a 500
+    carrying a raw ModuleNotFoundError.
+    """
+    if capability.get("mode") == "disabled":
+        return (
+            f"Local {kind} analysis is not enabled on this backend. "
+            "It runs only on a local Intel machine with LOCAL_SCORING_ENABLED=true."
+        )
+    missing_map = capability.get("missing_dependencies")
+    if missing_map is not None:
+        missing = missing_map.get(kind) or []
+        if missing:
+            return (
+                f"Local {kind} analysis is switched on but this deployment does not "
+                f"include the required packages ({', '.join(missing)}). "
+                "Install backend/requirements-local.txt, or set LOCAL_SCORING_ENABLED=false."
+            )
+        if capability.get("missing_models"):
+            return (
+                "Local OpenVINO models are not downloaded. Run: "
+                "python -m local_scoring.setup_delivery_models"
+            )
+    if kind == "vision":
+        return (
+            "Local OpenVINO vision models are not ready. Run the delivery model setup command first."
+        )
+    return f"Local {kind} analysis is not available on this backend."
+
+
 @app.get("/")
 def root():
     return {
@@ -283,8 +316,11 @@ async def analyze_audio_delivery(
     duration_seconds: float = Form(default=0),
 ):
     capability = capability_payload()
-    if not capability["enabled"]:
-        raise HTTPException(status_code=503, detail="Local audio analysis is not enabled on this backend.")
+    if not capability["audio_ready"]:
+        raise HTTPException(
+            status_code=503,
+            detail=_local_unavailable_detail(capability, "audio"),
+        )
 
     max_seconds = int(os.getenv("MAX_RECORDING_SECONDS", "300"))
     if duration_seconds > max_seconds + 5:
@@ -318,12 +354,10 @@ async def analyze_visual_delivery(
     duration_seconds: float = Form(default=0),
 ):
     capability = capability_payload()
-    if not capability["enabled"]:
-        raise HTTPException(status_code=503, detail="Local vision analysis is not enabled on this backend.")
     if not capability["vision_ready"]:
         raise HTTPException(
             status_code=503,
-            detail="Local OpenVINO vision models are not ready. Run the delivery model setup command first.",
+            detail=_local_unavailable_detail(capability, "vision"),
         )
 
     max_seconds = int(os.getenv("MAX_RECORDING_SECONDS", "300"))
@@ -369,16 +403,10 @@ async def analyze_delivery(
     duration_seconds: float = Form(default=0),
 ):
     capability = capability_payload()
-    if not capability["enabled"]:
-        raise HTTPException(
-            status_code=503,
-            detail="Local OpenVINO delivery analysis is not enabled on this backend.",
-        )
-    if not capability["models_ready"]:
-        raise HTTPException(
-            status_code=503,
-            detail="Local OpenVINO models are not ready. Run the delivery model setup command first.",
-        )
+    if not capability["audio_ready"]:
+        raise HTTPException(status_code=503, detail=_local_unavailable_detail(capability, "audio"))
+    if not capability["vision_ready"]:
+        raise HTTPException(status_code=503, detail=_local_unavailable_detail(capability, "vision"))
 
     max_seconds = int(os.getenv("MAX_RECORDING_SECONDS", "300"))
     if duration_seconds > max_seconds + 5:

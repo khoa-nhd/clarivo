@@ -140,6 +140,59 @@ If both Vercel projects are connected to the same GitHub repository and branch, 
 7. Complete one Q&A drill and confirm the five Q&A scores and Overall after Q&A appear.
 8. Refresh the page and confirm Session History remains in the browser.
 
+## Enabling voice analysis on the public backend
+
+`delivery_analysis.mode` reads `disabled` on the deployed backend because
+`LOCAL_SCORING_ENABLED=false`. The two halves of that feature have very
+different requirements, and only one of them can run on Vercel.
+
+### Voice: possible, with one caveat
+
+Measured against the real Vercel limits (docs, Aug 2026):
+
+| Constraint | Vercel Hobby | Voice needs | Verdict |
+|---|---|---|---|
+| Bundle size (Python) | 500 MB | ~434 MB | fits |
+| Max duration | 300 s | ~14 s for a 22 s clip | fits |
+| Memory | 2 GB / 1 vCPU | well under | fits |
+| Request body | **4.5 MB** | 32 KB/s of WAV | **caps length** |
+
+Voice analysis needs no OpenVINO: on the web the transcript comes from
+Cloudflare Whisper, so local ASR never runs and the analyzer is pure
+NumPy/librosa DSP. Verified by running the production endpoint against a real
+WAV with only `numpy`, `librosa` and `soundfile` installed - it returned a full
+voice score with speaking time accurate to 0.03 s.
+
+To enable it:
+
+1. Append the three lines from `backend/requirements-vercel-voice.txt` to
+   `backend/requirements.txt`.
+2. Set `LOCAL_SCORING_ENABLED=true` on the backend project.
+3. Set `MAX_RECORDING_SECONDS=140`. The browser uploads 16 kHz mono 16-bit WAV
+   at 32 KB/s, so 4.5 MB is about 140 seconds. Without this, longer recordings
+   are rejected by Vercel with a 413 before they ever reach the function.
+4. Redeploy and confirm `/api/health` shows `"audio_ready": true` and
+   `"vision_ready": false`.
+
+### Visual: not possible on Vercel
+
+Two independent blockers, either one fatal:
+
+- **Request body.** A camera recording is far larger than 4.5 MB - a 22 s
+  640x480 clip is 6.7 MB, a 60 s 720p clip is 143 MB. The video cannot reach
+  the function at all.
+- **Bundle.** opencv + openvino + ultralytics + torch measures ~1.7 GB, plus
+  ~58 MB of model weights. That needs the Large Functions beta (5 GB), and
+  even then there is no GPU or NPU: measured on an Intel Core Ultra 7 255H,
+  a 60 s 720p clip takes 12.9 s on the iGPU but 33.7 s on CPU.
+
+If you want visual analysis against a public frontend, the backend has to be
+something other than a serverless function - a long-running container (Render,
+Railway, Fly.io, Hugging Face Spaces) or your own Intel machine exposed through
+a tunnel. Only the latter gets the NPU/GPU numbers in `backend/BENCHMARKS.md`.
+
+Running `start.bat` locally gives you the complete feature set with no limits.
+
 ## Full Audio/Vision note
 
 The local build can run the complete Phase 20 OpenVINO Audio + Vision analyzer by setting `LOCAL_SCORING_ENABLED=true` and installing `requirements-local.txt`. The current Vercel public backend is intentionally the lightweight Cloudflare deployment, so it does not run the native OpenVINO analyzer. A public deployment of Phase 20 Audio/Vision requires a separate long-running compute backend or a browser/local-companion architecture rather than the current Vercel serverless backend.

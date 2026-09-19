@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -68,16 +69,81 @@ def models_ready() -> bool:
     return all(path.exists() for path in paths.values())
 
 
-def capability_payload() -> dict[str, Any]:
-    enabled = local_scoring_enabled()
-    vision_ready = models_ready() if enabled else False
+#: Import names each local capability needs, checked without importing them.
+_AUDIO_REQUIREMENTS = ("numpy", "librosa", "soundfile")
+_VISION_REQUIREMENTS = ("numpy", "cv2", "openvino", "ultralytics")
+
+
+@lru_cache(maxsize=1)
+def _missing_modules() -> dict[str, tuple[str, ...]]:
+    """Which local-analysis dependencies are absent from this interpreter.
+
+    ``find_spec`` resolves the module without executing it, so this is cheap and
+    safe to call on a serverless cold start.
+
+    This exists because ``LOCAL_SCORING_ENABLED=true`` on a deployment built
+    from the light ``requirements.txt`` - the public Vercel backend - used to be
+    advertised as a working capability. ``/api/health`` reported
+    ``enabled: true``, the frontend switched on the voice and visual panels, and
+    every resulting request failed with a 500 carrying an internal
+    ``ModuleNotFoundError`` message. Checking what is actually installed turns
+    that misconfiguration into the clean 503 the frontend already handles.
+    """
+    from importlib.util import find_spec
+
+    def absent(names: tuple[str, ...]) -> tuple[str, ...]:
+        missing = []
+        for name in names:
+            try:
+                if find_spec(name) is None:
+                    missing.append(name)
+            except (ImportError, ValueError):
+                missing.append(name)
+        return tuple(missing)
+
     return {
+        "audio": absent(_AUDIO_REQUIREMENTS),
+        "vision": absent(_VISION_REQUIREMENTS),
+    }
+
+
+def capability_payload() -> dict[str, Any]:
+    enabled_by_config = local_scoring_enabled()
+    missing = _missing_modules()
+
+    audio_ready = enabled_by_config and not missing["audio"]
+    vision_ready = enabled_by_config and not missing["vision"] and models_ready()
+    enabled = audio_ready or vision_ready
+
+    if not enabled_by_config:
+        mode = "disabled"
+    elif enabled:
+        mode = "local_openvino"
+    else:
+        # Configured on, but this deployment cannot actually run it.
+        mode = "unavailable"
+
+    payload: dict[str, Any] = {
         "enabled": enabled,
-        "audio_ready": enabled,
+        "audio_ready": audio_ready,
         "vision_ready": vision_ready,
         "models_ready": vision_ready,  # backward compatibility with the previous UI
-        "mode": "local_openvino" if enabled else "disabled",
+        "mode": mode,
     }
+    if enabled_by_config and not (audio_ready and vision_ready):
+        # Surface the reason per capability, so a deployment where one half
+        # works and the other does not - voice-only is a legitimate serverless
+        # shape - reports the real cause instead of blaming the models for a
+        # missing package.
+        payload["missing_dependencies"] = {
+            "audio": list(missing["audio"]),
+            "vision": list(missing["vision"]),
+        }
+        if not missing["vision"] and not models_ready():
+            payload["missing_models"] = True
+    if enabled_by_config and not enabled:
+        payload["configured_but_unavailable"] = True
+    return payload
 
 
 def _device_choice(requested: str, kind: str) -> str:
