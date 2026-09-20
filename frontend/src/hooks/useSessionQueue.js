@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { analyzeAudioDelivery, analyzeSession, analyzeVisionDelivery, checkHealth, evaluateDrillRound, finalizeDrillSession, generateDrillChallenges } from '../services/api.js'
+import { analyzeAudioDelivery, analyzeSession, analyzeVisionDelivery, checkHealth, checkLocalAiHealth, evaluateDrillRound, finalizeDrillSession, generateDrillChallenges, hasDedicatedLocalAi } from '../services/api.js'
 import { deleteSessionAudio, getSessionAudio, saveSessionAudio } from '../services/audioStore.js'
 import { deleteSessionVideo, getSessionVideo, saveSessionVideo } from '../services/videoStore.js'
 
@@ -103,17 +103,53 @@ export function useSessionQueue() {
     return health
   }, [])
 
+  // Read both backends and merge them into one health object.
+  //
+  // The main backend describes the AI provider and the drill settings. When a
+  // dedicated voice/visual backend is configured, its own capability report
+  // replaces delivery_analysis - asking the serverless backend whether OpenVINO
+  // is available would always answer no, because it never runs it.
+  const probeHealth = useCallback(async () => {
+    const main = await checkHealth()
+    if (!hasDedicatedLocalAi()) return main
+    try {
+      const localAi = await checkLocalAiHealth()
+      return {
+        ...main,
+        delivery_analysis: {
+          ...(localAi?.delivery_analysis || {}),
+          served_by: 'local_ai_backend',
+        },
+      }
+    } catch {
+      // The machine behind the tunnel is off. Content and Q&A still work, so
+      // report only voice/visual as unavailable rather than failing outright.
+      return {
+        ...main,
+        delivery_analysis: {
+          enabled: false,
+          audio_ready: false,
+          vision_ready: false,
+          models_ready: false,
+          mode: 'offline',
+          served_by: 'local_ai_backend',
+          unreachable: true,
+        },
+      }
+    }
+  }, [])
+
   // Re-read the backend capabilities. Returns the freshest value available.
   const refreshHealth = useCallback(async () => {
     try {
-      return applyHealth(await checkHealth())
+      return applyHealth(await probeHealth())
     } catch {
       // Do not downgrade a previously successful reading because of one blip;
       // that would flap the whole delivery UI off and back on.
       if (backendHealthRef.current) return backendHealthRef.current
       return applyHealth({ delivery_analysis: { enabled: false, unreachable: true } })
     }
-  }, [applyHealth])
+  }, [applyHealth, probeHealth])
 
   // The capability probe used to run exactly once, with no retry, and cache a
   // permanent "disabled" result on any failure. Frontend and backend start
@@ -130,7 +166,7 @@ export function useSessionQueue() {
     const probe = async () => {
       if (cancelled) return
       try {
-        applyHealth(await checkHealth())
+        applyHealth(await probeHealth())
       } catch {
         if (cancelled) return
         if (!backendHealthRef.current) {
@@ -146,7 +182,7 @@ export function useSessionQueue() {
 
     probe()
     return () => { cancelled = true; if (timer) clearTimeout(timer) }
-  }, [applyHealth])
+  }, [applyHealth, probeHealth])
 
   // Re-probe when the user returns to the tab, which is when a backend that was
   // restarted in the meantime would otherwise still look absent.
@@ -159,6 +195,26 @@ export function useSessionQueue() {
       document.removeEventListener('visibilitychange', onWake)
     }
   }, [refreshHealth])
+
+  // Keep watching while the voice/visual backend is offline.
+  //
+  // The retry loop above only fires when the health request itself fails, and
+  // once the backends were split that stopped covering this case: probeHealth
+  // handles an unreachable local-AI backend internally and returns a perfectly
+  // successful result that merely says "offline". So the machine behind the
+  // tunnel could come back and the page would never notice. This is the poll
+  // that closes that gap - one small GET while it is down, stopping as soon as
+  // it answers.
+  const localAiUnreachable = Boolean(
+    hasDedicatedLocalAi() && backendHealth?.delivery_analysis?.unreachable,
+  )
+  useEffect(() => {
+    if (!localAiUnreachable) return undefined
+    const timer = setInterval(() => {
+      if (document.visibilityState !== 'hidden') refreshHealth()
+    }, 15000)
+    return () => clearInterval(timer)
+  }, [localAiUnreachable, refreshHealth])
 
   useEffect(() => {
     sessionsRef.current = sessions
@@ -173,6 +229,10 @@ export function useSessionQueue() {
   const localVisionEnabled = visionAvailable(backendHealth)
   const localDeliveryEnabled = localAudioEnabled || localVisionEnabled
   const backendUnreachable = Boolean(backendHealth?.delivery_analysis?.unreachable)
+  // Distinguishes "this backend was never built to run it" from "the machine
+  // that runs it is currently off", which are very different things to tell a
+  // user staring at a disabled panel.
+  const localAiOffline = backendHealth?.delivery_analysis?.mode === 'offline'
   const uploadLimits = backendHealth?.delivery_analysis?.limits ?? null
 
   useEffect(() => {
@@ -543,6 +603,7 @@ export function useSessionQueue() {
     localAudioEnabled,
     localVisionEnabled,
     backendUnreachable,
+    localAiOffline,
     uploadLimits,
     refreshHealth,
     addSession,

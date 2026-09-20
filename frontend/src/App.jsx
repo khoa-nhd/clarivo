@@ -39,6 +39,7 @@ export default function App() {
             queueCount={queue.counts.queued + queue.counts.processing}
             visionEnabled={queue.localVisionEnabled}
             uploadLimits={queue.uploadLimits}
+            localAiOffline={queue.localAiOffline}
           />
         )}
 

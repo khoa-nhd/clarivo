@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { HOSTED_UPLOAD_LIMIT_BYTES, isHostedApi, transcribeAudio } from '../services/api.js'
+import { HOSTED_UPLOAD_LIMIT_BYTES, localAiHasBodyCap, transcribeAudio } from '../services/api.js'
 import { compressedAudioToWav } from '../services/audioProcessing.js'
 
 // Fallbacks only. The real ceilings come from /api/health so the browser and
@@ -47,6 +47,7 @@ export default function VideoUploadPanel({
   resetKey,
   visionEnabled = true,
   limits = null,
+  localAiOffline = false,
 }) {
   // Two ceilings apply. The backend publishes its own, but a hosted deployment
   // also sits behind a platform request-body cap it cannot raise, and that one
@@ -54,7 +55,7 @@ export default function VideoUploadPanel({
   // the two at file-selection time so the user is told immediately rather than
   // after the transcript step has already run.
   const serverMaxVideoBytes = Number(limits?.max_video_bytes) || FALLBACK_MAX_UPLOAD_VIDEO_BYTES
-  const maxVideoBytes = isHostedApi()
+  const maxVideoBytes = localAiHasBodyCap()
     ? Math.min(serverMaxVideoBytes, HOSTED_UPLOAD_LIMIT_BYTES)
     : serverMaxVideoBytes
   const maxRecordingSeconds = Number(limits?.max_recording_seconds) || FALLBACK_MAX_RECORDING_SECONDS
@@ -107,7 +108,7 @@ export default function VideoUploadPanel({
     }
     if (file.size > maxVideoBytes) {
       setError(
-        isHostedApi() && maxVideoBytes === HOSTED_UPLOAD_LIMIT_BYTES
+        localAiHasBodyCap() && maxVideoBytes === HOSTED_UPLOAD_LIMIT_BYTES
           ? `This file is ${formatBytes(file.size)}. The hosted backend accepts at most ${formatBytes(maxVideoBytes)} per upload, so visual analysis of a full recording needs Clarivo running locally.`
           : `This file is ${formatBytes(file.size)}, over the ${formatBytes(maxVideoBytes)} this backend accepts.`,
       )
@@ -183,7 +184,11 @@ export default function VideoUploadPanel({
               <div className="eyebrow">Presentation upload</div>
               <h3>{processing ? 'Preparing transcript…' : 'Upload a recorded video'}</h3>
               {!visionEnabled && (
-                <p>This backend doesn't run local visual/voice delivery analysis; content feedback will still run on your uploaded video.</p>
+                <p>
+                  {localAiOffline
+                    ? 'The machine that runs voice and visual analysis is offline right now. Content feedback still runs on your uploaded video, and voice/visual will come back on their own once it is available again.'
+                    : "This backend doesn't run local visual/voice delivery analysis; content feedback will still run on your uploaded video."}
+                </p>
               )}
             </div>
             {duration > 0 && <div className="recording-clock">{formatDuration(duration)}</div>}

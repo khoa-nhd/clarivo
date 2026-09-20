@@ -1,7 +1,35 @@
+// Clarivo can talk to two backends at once.
+//
+//   VITE_API_BASE_URL       the always-on serverless backend (Vercel). Serves
+//                           transcription, content analysis and the Q&A drills,
+//                           all of which are small JSON or short audio.
+//   VITE_LOCAL_AI_BASE_URL  optional. A machine running the OpenVINO stack,
+//                           reached over a tunnel. Serves the voice and visual
+//                           analysis, which need packages and upload sizes a
+//                           serverless function cannot provide.
+//
+// Splitting them means the site keeps working when that machine is off: content
+// and Q&A carry on, and only voice/visual report unavailable. Leave the second
+// one empty and everything goes to the first, which is the previous behaviour.
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
+const LOCAL_AI_BASE_URL = (import.meta.env.VITE_LOCAL_AI_BASE_URL || '').replace(/\/$/, '')
 
 function apiUrl(path) {
   return `${API_BASE_URL}${path}`
+}
+
+/** Base for the voice/visual endpoints; falls back to the main backend. */
+export function localAiBase() {
+  return LOCAL_AI_BASE_URL || API_BASE_URL
+}
+
+function localAiUrl(path) {
+  return `${localAiBase()}${path}`
+}
+
+/** True when voice/visual go to their own backend rather than the serverless one. */
+export function hasDedicatedLocalAi() {
+  return LOCAL_AI_BASE_URL.length > 0
 }
 
 // A hosted backend is one reached through an absolute URL. The local dev server
@@ -25,8 +53,15 @@ function describeLimit() {
   return `${minutes}m${String(seconds % 60).padStart(2, '0')}s`
 }
 
+/** Whether the media endpoints are subject to the serverless body cap. */
+export function localAiHasBodyCap() {
+  // A tunnel terminates at a real server, which has no such ceiling. The cap
+  // only exists when voice/visual are served by the serverless backend itself.
+  return isHostedApi() && !hasDedicatedLocalAi()
+}
+
 function assertUploadFits(blob, label) {
-  if (!isHostedApi() || !blob || blob.size <= HOSTED_UPLOAD_LIMIT_BYTES) return
+  if (!localAiHasBodyCap() || !blob || blob.size <= HOSTED_UPLOAD_LIMIT_BYTES) return
   const actual = (blob.size / 1024 / 1024).toFixed(1)
   const cap = (HOSTED_UPLOAD_LIMIT_BYTES / 1024 / 1024).toFixed(1)
   throw new Error(
@@ -90,6 +125,18 @@ export async function checkHealth() {
   return response.json()
 }
 
+/** Capability probe for the voice/visual backend.
+ *
+ * Only meaningful when a dedicated one is configured; otherwise the main
+ * health response already describes it.
+ */
+export async function checkLocalAiHealth() {
+  if (!hasDedicatedLocalAi()) return null
+  const response = await fetch(localAiUrl('/api/health'))
+  if (!response.ok) throw new Error('Local AI backend unavailable')
+  return response.json()
+}
+
 export async function analyzeDelivery({ audioWavBlob, videoBlob, transcript, durationSeconds = 0 }) {
   assertUploadFits(audioWavBlob, 'The audio track')
   assertUploadFits(videoBlob, 'The camera recording')
@@ -100,7 +147,7 @@ export async function analyzeDelivery({ audioWavBlob, videoBlob, transcript, dur
   formData.append('transcript', transcript || '')
   formData.append('duration_seconds', String(durationSeconds || 0))
 
-  const response = await fetch(apiUrl('/api/analyze/delivery'), {
+  const response = await fetch(localAiUrl('/api/analyze/delivery'), {
     method: 'POST',
     body: formData,
   })
@@ -117,7 +164,7 @@ export async function analyzeAudioDelivery({ audioWavBlob, transcript, durationS
   formData.append('transcript', transcript || '')
   formData.append('duration_seconds', String(durationSeconds || 0))
 
-  const response = await fetch(apiUrl('/api/analyze/audio'), {
+  const response = await fetch(localAiUrl('/api/analyze/audio'), {
     method: 'POST',
     body: formData,
   })
@@ -133,7 +180,7 @@ export async function analyzeVisionDelivery({ videoBlob, durationSeconds = 0 }) 
   formData.append('video', videoBlob, `camera.${videoExtension}`)
   formData.append('duration_seconds', String(durationSeconds || 0))
 
-  const response = await fetch(apiUrl('/api/analyze/vision'), {
+  const response = await fetch(localAiUrl('/api/analyze/vision'), {
     method: 'POST',
     body: formData,
   })

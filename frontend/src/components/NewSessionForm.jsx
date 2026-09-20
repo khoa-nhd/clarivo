@@ -19,7 +19,7 @@ function loadTopicLibrary() {
 // Mirrors MAX_REFERENCE_CHARS on the backend, which returns 413 above it.
 const REFERENCE_CHAR_LIMIT = 20000
 
-export default function NewSessionForm({ onSubmit, queueCount, visionEnabled = true, uploadLimits = null }) {
+export default function NewSessionForm({ onSubmit, queueCount, visionEnabled = true, uploadLimits = null, localAiOffline = false }) {
   const [selectedProfile, setSelectedProfile] = useState(null)
   const [topic, setTopic] = useState('')
   const [targetAudience, setTargetAudience] = useState('Beginner')
@@ -275,6 +275,7 @@ export default function NewSessionForm({ onSubmit, queueCount, visionEnabled = t
             onMediaReady={setMediaDraft}
             visionEnabled={visionEnabled}
             limits={uploadLimits}
+            localAiOffline={localAiOffline}
           />
         )}
 

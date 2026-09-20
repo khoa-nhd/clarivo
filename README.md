@@ -38,10 +38,16 @@ Local OpenVINO voice/visual analysis is a separate, much larger install
 `backend\setup_local_scoring.bat`, then set `LOCAL_SCORING_ENABLED=true` in
 `backend\.env`.
 
+To publish with Voice + Visual working online for free, see
+`DEPLOY_TUNNEL.md` (Vercel for content, a Cloudflare Tunnel to this machine for
+the OpenVINO analysis).
+
 Other docs:
 - `RUN_LEARNING_LOOP_WINDOWS.md` — exact Windows commands
 - `LEARNING_LOOP_IMPLEMENTATION.md` — feature and architecture map
 - `backend/BENCHMARKS.md` — how to reproduce every accuracy/performance number
+- `DEPLOY_TUNNEL.md` — free public deploy with full features
+- `DEPLOY_PUBLIC_VERCEL.md` — serverless-only deploy and its platform limits
 
 ## Frontend starter library
 Edit `frontend/src/data/topicLibrary.js` to add or change prepared topics.
