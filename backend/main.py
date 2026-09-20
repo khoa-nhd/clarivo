@@ -1,5 +1,6 @@
 """Clarivo FastAPI application used locally and by Vercel."""
 
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -34,6 +35,8 @@ from app.local_delivery import (
     capability_payload,
     upload_limits,
 )
+
+logger = logging.getLogger("clarivo")
 
 app = FastAPI(title="Clarivo API", version="1.4.0")
 
@@ -205,7 +208,13 @@ async def transcribe(
         os.getenv("AI_PROVIDER", "mock"),
     ).strip().lower()
 
-    print("🔥 TRANSCRIPTION PROVIDER:", repr(provider))
+    # Leftover debug output used to sit here as a print() containing an emoji.
+    # A Windows console runs cp1252 by default, which cannot encode it, so the
+    # print raised UnicodeEncodeError on *every* transcription request. The
+    # generic handler below caught it and answered 502 "could not transcribe",
+    # which pointed at Whisper rather than at a print statement. Use the logger:
+    # it never writes characters the stream cannot represent.
+    logger.debug("Transcription provider: %s", provider)
 
     max_recording_seconds = int(os.getenv("MAX_RECORDING_SECONDS", "300"))
     if duration_seconds > max_recording_seconds + 5:
@@ -260,6 +269,10 @@ async def transcribe(
             model=result["model"],
         )
     except Exception as exc:
+        # Log the real cause. The public message below is deliberately vague so
+        # it cannot leak credentials, but without this line a transcription
+        # failure was undiagnosable from either side.
+        logger.exception("Transcription failed (%s bytes, mime=%s)", len(data), mime_type)
         message = str(exc)
         lowered = message.lower()
         if "rate limit" in lowered or "too many requests" in lowered or "http 429" in lowered:
@@ -302,6 +315,7 @@ def analyze(request: AnalysisRequest):
     try:
         return evaluate_explanation(request)
     except Exception as exc:
+        logger.exception("Content analysis failed for topic=%r", request.topic)
         message = str(exc)
         lowered = message.lower()
         if "rate limit" in lowered or "too many requests" in lowered or "http 429" in lowered:
@@ -329,6 +343,7 @@ def analyze(request: AnalysisRequest):
 
 
 def _drill_http_error(exc: Exception) -> HTTPException:
+    logger.exception("Drill request failed", exc_info=exc)
     message = str(exc)
     lowered = message.lower()
     if "rate limit" in lowered or "too many requests" in lowered or "http 429" in lowered:

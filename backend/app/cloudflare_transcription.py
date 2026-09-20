@@ -34,19 +34,31 @@ def _get_credentials() -> tuple[str, str, str]:
 
 
 def _extract_text(payload: dict[str, Any]) -> str:
+    """Pull the transcript out of a successful Whisper response.
+
+    An empty transcript is a *result*, not a failure. Whisper legitimately
+    returns one for a clip with no speech: a screen recording with no
+    microphone, a video whose audio track is silent, or someone who has not
+    started talking yet. This used to raise, and the endpoint turned that into
+    a 502 that blocked the entire upload - including the visual analysis, which
+    needs no transcript at all, and the transcript box the user could simply
+    have typed into.
+
+    Only a response with no recognised transcript field is a real error, since
+    that means the reply was not the shape this code understands.
+    """
     result: Any = payload.get("result", payload)
 
     if isinstance(result, dict):
         for key in ("text", "transcription", "response"):
-            value = result.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
+            if key in result and isinstance(result[key], str):
+                return result[key].strip()
 
-    if isinstance(result, str) and result.strip():
+    if isinstance(result, str):
         return result.strip()
 
     raise CloudflareTranscriptionError(
-        "Whisper returned a response but no transcript text was found."
+        "Whisper returned a response in an unexpected shape with no transcript field."
     )
 
 

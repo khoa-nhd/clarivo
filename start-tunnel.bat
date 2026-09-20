@@ -8,6 +8,11 @@ set "ROOT=%CD%"
 set "VENV_PY=%ROOT%\backend\.venv\Scripts\python.exe"
 set "PORT=8000"
 
+REM  PYTHONIOENCODING: mot ky tu khong ma hoa duoc trong log (vi du emoji)
+REM  se nem UnicodeEncodeError tren console Windows (cp1252) va lam HONG
+REM  request dang xu ly. Ep UTF-8 de dieu do khong the xay ra.
+set "PYTHONIOENCODING=utf-8"
+
 echo.
 echo  ==========================================
 echo    CLARIVO - mo backend AI ra internet

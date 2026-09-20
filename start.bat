@@ -5,6 +5,11 @@ title Clarivo
 cd /d "%~dp0"
 
 set "ROOT=%CD%"
+
+REM  PYTHONIOENCODING: mot ky tu khong ma hoa duoc trong log (vi du emoji)
+REM  se nem UnicodeEncodeError tren console Windows (cp1252) va lam HONG
+REM  request dang xu ly. Ep UTF-8 de dieu do khong the xay ra.
+set "PYTHONIOENCODING=utf-8"
 set "VENV_PY=%ROOT%\backend\.venv\Scripts\python.exe"
 
 echo.

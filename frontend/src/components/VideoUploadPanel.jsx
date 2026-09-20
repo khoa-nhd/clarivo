@@ -129,7 +129,8 @@ export default function VideoUploadPanel({
 
       setNotice('Creating transcript…')
       const transcription = await transcribeAudio(wavBlob, { durationSeconds, topic })
-      setTranscript(transcription.text || '')
+      const transcriptText = transcription.text || ''
+      setTranscript(transcriptText)
 
       if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current)
       const url = URL.createObjectURL(file)
@@ -138,7 +139,15 @@ export default function VideoUploadPanel({
       setFileName(file.name)
       setFileSize(file.size)
       setDuration(durationSeconds)
-      setNotice('Transcript ready. Review it before analysis.')
+      // An empty transcript is a legitimate outcome - a screen recording with no
+      // microphone, a silent audio track, or simply nobody speaking. Saying
+      // "transcript ready" for an empty box would leave the user staring at a
+      // disabled submit button with no idea why.
+      setNotice(
+        transcriptText.trim()
+          ? 'Transcript ready. Review it before analysis.'
+          : 'No speech was detected in this video. Visual analysis will still run - type or paste what you said into the transcript box below to get content and voice feedback too.',
+      )
 
       onMediaReady?.({
         audioBlob: wavBlob,
@@ -150,7 +159,7 @@ export default function VideoUploadPanel({
         videoSizeBytes: file.size,
         transcriptionModel: transcription.model,
         transcriptionWordCount: transcription.word_count,
-        rawTranscript: transcription.text || '',
+        rawTranscript: transcriptText,
         language: 'en',
       })
     } catch (processingError) {
