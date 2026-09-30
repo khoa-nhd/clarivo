@@ -1,5 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { analyzeAudioDelivery, analyzeSession, analyzeVisionDelivery, checkHealth, checkLocalAiHealth, evaluateDrillRound, finalizeDrillSession, generateDrillChallenges, hasDedicatedLocalAi } from '../services/api.js'
+import {
+  BUILD_TIME_LOCAL_AI_BASE,
+  clearLocalAiOverride,
+  getLinkAddressResult,
+  localAiIsOverridden,
+  resolveLocalAiBase,
+  setLocalAiOverride,
+  subscribeLocalAi,
+} from '../services/localAiConfig.js'
 import { deleteSessionAudio, getSessionAudio, saveSessionAudio } from '../services/audioStore.js'
 import { deleteSessionVideo, getSessionVideo, saveSessionVideo } from '../services/videoStore.js'
 
@@ -93,6 +102,7 @@ export function useSessionQueue() {
   const [sessions, setSessions] = useState(loadSessions)
   const [activeId, setActiveId] = useState(() => loadSessions()[0]?.id ?? null)
   const [backendHealth, setBackendHealth] = useState(null)
+  const [localAiBaseUrl, setLocalAiBaseUrl] = useState(resolveLocalAiBase)
   const inFlightIdRef = useRef(null)
   const sessionsRef = useRef(sessions)
   const backendHealthRef = useRef(null)
@@ -215,6 +225,26 @@ export function useSessionQueue() {
     }, 15000)
     return () => clearInterval(timer)
   }, [localAiUnreachable, refreshHealth])
+
+  // The voice/visual address is no longer fixed at build time: a visitor can
+  // arrive on a link carrying `?ai=`, or paste a new tunnel address into the
+  // field. Re-probe the moment it changes, and drop the cached reading first so
+  // the new backend's own capabilities decide the chips rather than the old
+  // one's lingering answer.
+  useEffect(() => subscribeLocalAi((next) => {
+    setLocalAiBaseUrl(next)
+    backendHealthRef.current = null
+    refreshHealth()
+  }), [refreshHealth])
+
+  /** Point voice/visual at a different backend. Empty string restores the
+   *  address the site was built with. Throws if the text is not an address. */
+  const applyLocalAiBaseUrl = useCallback((raw) => {
+    const trimmed = String(raw ?? '').trim()
+    if (trimmed) return setLocalAiOverride(trimmed)
+    clearLocalAiOverride()
+    return BUILD_TIME_LOCAL_AI_BASE
+  }, [])
 
   useEffect(() => {
     sessionsRef.current = sessions
@@ -606,6 +636,10 @@ export function useSessionQueue() {
     localAiOffline,
     uploadLimits,
     refreshHealth,
+    localAiBaseUrl,
+    localAiFromLink: localAiIsOverridden(),
+    localAiLinkError: getLinkAddressResult()?.failure || '',
+    applyLocalAiBaseUrl,
     addSession,
     setActiveId,
     retrySession,

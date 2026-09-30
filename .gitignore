@@ -39,3 +39,7 @@ runtime/
 
 # Local tooling state
 .claude/scheduled_tasks.lock
+
+# Produced by start-tunnel.bat, different every run.
+tunnel.log
+SHARE_LINK.txt

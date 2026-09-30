@@ -57,37 +57,25 @@ goto :wait_backend
 :backend_up
 
 REM ----------------------------------------------------------------------
-REM  3. Mo duong ham
+REM  3. Mo duong ham va tu ghep link chia se
+REM
+REM     Dia chi quick tunnel doi moi lan chay. Frontend doc dia chi nay LUC
+REM     CHAY (tham so ?ai= tren link), khong phai luc build - nen doi dia chi
+REM     chi can gui link moi, KHONG can build lai tren Vercel.
 REM ----------------------------------------------------------------------
 echo  [2/2] Mo duong ham Cloudflare...
-echo.
-echo  ------------------------------------------------------------------
-echo   TIM DONG CO DANG:  https://....trycloudflare.com
-echo   trong cua so "Clarivo tunnel" vua hien ra.
-echo.
-echo   Do la dia chi backend AI cua ban.
-echo  ------------------------------------------------------------------
-echo.
-echo   LUU Y QUAN TRONG:
-echo   - Dia chi nay DOI MOI LAN chay (quick tunnel).
-echo     Doi mot lan la phai build lai frontend tren Vercel.
-echo     Muon dia chi co dinh, dung named tunnel - xem
-echo     DEPLOY_TUNNEL.md muc "Duong ham co dinh".
-echo.
-echo   - Sau khi co dia chi, dat vao Vercel (frontend):
-echo         VITE_LOCAL_AI_BASE_URL=https://...trycloudflare.com
-echo     va vao backend\.env tren may nay:
-echo         ALLOWED_ORIGINS=https://ten-frontend.vercel.app
-echo.
-echo   - May nay phai MO va KHONG NGU thi phan Giong noi/Hinh anh
-echo     moi hoat dong.
-echo.
+if exist "%ROOT%\tunnel.log" del "%ROOT%\tunnel.log" >nul 2>&1
+start "Clarivo tunnel" cmd /k "cloudflared tunnel --url http://127.0.0.1:%PORT% --logfile ""%ROOT%\tunnel.log"""
 
-start "Clarivo tunnel" cmd /k "cloudflared tunnel --url http://127.0.0.1:%PORT%"
+echo  Dang doi cloudflared cap dia chi...
+pushd "%ROOT%\backend"
+"%VENV_PY%" -m tools.share_link --log "%ROOT%\tunnel.log" --out "%ROOT%\SHARE_LINK.txt"
+popd
 
-echo  Da mo 2 cua so. Dong chung lai la tat.
+echo   May nay phai MO va KHONG NGU thi phan Giong noi / Hinh anh
+echo   moi hoat dong. Dong 2 cua so vua hien ra la tat het.
 echo.
-ping -n 6 127.0.0.1 >nul
+pause
 exit /b 0
 
 REM ----------------------------------------------------------------------

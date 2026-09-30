@@ -11,8 +11,13 @@
 // Splitting them means the site keeps working when that machine is off: content
 // and Q&A carry on, and only voice/visual report unavailable. Leave the second
 // one empty and everything goes to the first, which is the previous behaviour.
+//
+// The second address is resolved per call rather than read once at module load,
+// because it can be supplied at runtime by a shared link or the in-app field -
+// see services/localAiConfig.js.
+import { resolveLocalAiBase } from './localAiConfig.js'
+
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
-const LOCAL_AI_BASE_URL = (import.meta.env.VITE_LOCAL_AI_BASE_URL || '').replace(/\/$/, '')
 
 function apiUrl(path) {
   return `${API_BASE_URL}${path}`
@@ -20,7 +25,7 @@ function apiUrl(path) {
 
 /** Base for the voice/visual endpoints; falls back to the main backend. */
 export function localAiBase() {
-  return LOCAL_AI_BASE_URL || API_BASE_URL
+  return resolveLocalAiBase() || API_BASE_URL
 }
 
 function localAiUrl(path) {
@@ -29,7 +34,7 @@ function localAiUrl(path) {
 
 /** True when voice/visual go to their own backend rather than the serverless one. */
 export function hasDedicatedLocalAi() {
-  return LOCAL_AI_BASE_URL.length > 0
+  return resolveLocalAiBase().length > 0
 }
 
 // A hosted backend is one reached through an absolute URL. The local dev server
@@ -130,11 +135,21 @@ export async function checkHealth() {
  * Only meaningful when a dedicated one is configured; otherwise the main
  * health response already describes it.
  */
-export async function checkLocalAiHealth() {
+export async function checkLocalAiHealth({ timeoutMs = 8000 } = {}) {
   if (!hasDedicatedLocalAi()) return null
-  const response = await fetch(localAiUrl('/api/health'))
-  if (!response.ok) throw new Error('Local AI backend unavailable')
-  return response.json()
+  // A tunnel to a machine that is off does not refuse the connection - it hangs
+  // until the browser's own timeout, which is minutes. Without a deadline the
+  // page would sit on "checking" instead of saying voice/visual are offline,
+  // and the poll that watches for the machine coming back would never fire.
+  const abort = new AbortController()
+  const timer = setTimeout(() => abort.abort(), timeoutMs)
+  try {
+    const response = await fetch(localAiUrl('/api/health'), { signal: abort.signal })
+    if (!response.ok) throw new Error('Local AI backend unavailable')
+    return await response.json()
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 export async function analyzeDelivery({ audioWavBlob, videoBlob, transcript, durationSeconds = 0 }) {

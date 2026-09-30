@@ -22,37 +22,55 @@ Xong. Không cần gì thêm.
 
 Bấm đúp **`start-tunnel.bat`**.
 
-Nó mở **2 cửa sổ đen**:
+Nó mở **2 cửa sổ đen** và in ra **một đường link**:
 
 | Cửa sổ | Tên | Nhiệm vụ |
 |---|---|---|
 | 1 | `Clarivo AI backend - port 8000` | Chạy AI Giọng nói + Hình ảnh |
 | 2 | `Clarivo tunnel` | Nối máy bạn ra internet |
 
-**Cả 2 cửa sổ phải để yên, không được đóng.** Đóng là trang public mất phần
-Giọng nói / Hình ảnh ngay.
+Sau khoảng 5–10 giây, cửa sổ chính in ra:
+
+```
+  ==================================================================
+   LINK GUI CHO NGUOI KHAC (da co san dia chi AI ben trong):
+
+   https://clarivo-kohl.vercel.app/?ai=https://abc-xyz.trycloudflare.com
+
+  ==================================================================
+```
+
+**Gửi đúng đường link đó** cho ban giám khảo / bạn bè. Link đã được copy sẵn vào
+clipboard và lưu ở file `SHARE_LINK.txt`, nên chỉ cần Ctrl+V.
+
+Ai mở link đó sẽ dùng được **đầy đủ** Nội dung + Giọng nói + Hình ảnh.
+
+> **Cả 2 cửa sổ phải để yên, không được đóng.** Đóng là phần Giọng nói / Hình
+> ảnh tắt ngay (phần Nội dung và Q&A vẫn chạy bình thường).
 
 Bạn **không cần** chạy `start.bat` nữa — `start-tunnel.bat` đã bao gồm backend.
-Frontend thì đã nằm trên Vercel rồi, máy bạn không cần chạy frontend.
+Frontend đã nằm trên Vercel, máy bạn không cần chạy frontend.
 
-### Nếu dùng quick tunnel (địa chỉ ngẫu nhiên)
+### Tại sao phải có `?ai=...` trong link
 
-Mỗi lần mở `start-tunnel.bat`, địa chỉ **đổi mới**. Nên mỗi lần bạn phải:
+Địa chỉ tunnel **đổi mỗi lần chạy**. Trang web đọc địa chỉ đó **lúc chạy**, từ
+chính đường link — chứ không phải lúc build. Nhờ vậy đổi địa chỉ **không cần
+build lại Vercel**, chỉ cần gửi link mới.
 
-1. Nhìn cửa sổ **Clarivo tunnel**, tìm dòng `https://....trycloudflare.com`
-2. Vào Vercel → project frontend → Settings → Environment Variables
-3. Sửa `VITE_LOCAL_AI_BASE_URL` thành địa chỉ mới
-4. Deployments → Redeploy
+Link cũ (không có `?ai=`) vẫn mở được trang, nhưng sẽ báo *Voice + Visual: not
+connected*. Khi đó bấm vào chữ đó ở góc trên bên phải rồi dán địa chỉ tunnel
+vào ô hiện ra — cũng ra kết quả như nhau.
 
-Mất khoảng 2 phút mỗi lần. **Phiền** — nên làm Phần 4 (đường hầm cố định) để
-không bao giờ phải làm lại bước này nữa.
+Trình duyệt **nhớ** địa chỉ này. Người đã mở link một lần thì lần sau vào thẳng
+`https://clarivo-kohl.vercel.app` vẫn còn — cho tới khi bạn chạy lại tunnel và
+địa chỉ đổi, lúc đó gửi lại link mới.
 
 ## Tóm tắt
 
-| Bạn muốn | Mở cái gì | Để yên cửa sổ nào |
+| Bạn muốn | Mở cái gì | Gửi gì cho người khác |
 |---|---|---|
-| Làm việc một mình | `start.bat` | 2 cửa sổ đen |
-| Người khác vào được | `start-tunnel.bat` | 2 cửa sổ đen |
+| Làm việc một mình | `start.bat` | — |
+| Người khác vào được | `start-tunnel.bat` | Đường link nó in ra |
 
 ---
 
@@ -62,7 +80,8 @@ không bao giờ phải làm lại bước này nữa.
                  Frontend Vercel (luôn bật, miễn phí)
                                │
           ┌────────────────────┴─────────────────────┐
-   VITE_API_BASE_URL                     VITE_LOCAL_AI_BASE_URL
+   VITE_API_BASE_URL                   ?ai=... trong đường link
+   (nhúng lúc build, cố định)          (đọc lúc chạy, đổi được)
           │                                          │
   Backend Vercel (luôn bật)              Cloudflare Tunnel → máy bạn
   • Phiên âm Whisper                     • Giọng nói
@@ -102,40 +121,59 @@ winget install --id Cloudflare.cloudflared
 ```env
 LOCAL_SCORING_ENABLED=true
 ALLOWED_ORIGINS=https://clarivo-kohl.vercel.app
+ALLOWED_ORIGIN_REGEX=https://clarivo-[a-z0-9-]+\.vercel\.app
+PUBLIC_FRONTEND_URL=https://clarivo-kohl.vercel.app
 ```
+
+| Biến | Để làm gì |
+|---|---|
+| `LOCAL_SCORING_ENABLED` | Bật Giọng nói + Hình ảnh trên máy này |
+| `ALLOWED_ORIGINS` | Cho phép trang Vercel gọi vào máy này (CORS) |
+| `ALLOWED_ORIGIN_REGEX` | Cho phép luôn các bản deploy preview của Vercel |
+| `PUBLIC_FRONTEND_URL` | Để `start-tunnel.bat` tự ghép đường link chia sẻ |
 
 > ⚠️ **Lỗi hay gặp nhất.** `ALLOWED_ORIGINS` phải khớp **từng ký tự** với địa chỉ
 > frontend. Không có dấu `/` ở cuối. `localhost` và `127.0.0.1` là hai địa chỉ
 > **khác nhau**. Sai một ký tự là trình duyệt chặn (CORS) và bạn chỉ thấy
 > "Failed to fetch" mà không rõ lý do.
 
-Nhiều địa chỉ thì ngăn bằng dấu phẩy, không có khoảng trắng:
+Vercel đặt tên khác nhau cho mỗi bản deploy (`clarivo-git-main-...`,
+`clarivo-abc123-...`). Liệt kê từng cái thì không xuể, nên có
+`ALLOWED_ORIGIN_REGEX` — một mẫu khớp mọi bản deploy **của riêng project bạn**.
+Giữ phần `clarivo-` ở đầu; bỏ đi là mở cửa cho mọi trang `.vercel.app` trên đời.
+
+Nhiều địa chỉ cố định thì ngăn bằng dấu phẩy, không có khoảng trắng:
 
 ```env
-ALLOWED_ORIGINS=https://clarivo-kohl.vercel.app,https://clarivo-git-main-khoanhd.vercel.app
+ALLOWED_ORIGINS=https://clarivo-kohl.vercel.app,https://clarivo.io.vn
 ```
 
-## 3.3 — Mở tunnel và lấy địa chỉ
+## 3.3 — Mở tunnel và lấy link
 
-Bấm đúp `start-tunnel.bat`. Trong cửa sổ **Clarivo tunnel**, tìm:
+Bấm đúp `start-tunnel.bat` rồi đợi khoảng 10 giây. Cửa sổ chính in ra đường link
+đã ghép sẵn địa chỉ tunnel, đồng thời copy vào clipboard và lưu vào
+`SHARE_LINK.txt`.
 
+Nếu muốn tự chạy lại phần ghép link (tunnel đang mở sẵn):
+
+```powershell
+cd backend
+.venv\Scripts\python.exe -m tools.share_link
 ```
-https://random-words-here.trycloudflare.com
-```
 
-## 3.4 — Nối Vercel với tunnel
+## 3.4 — Đặt biến trên Vercel (một lần duy nhất)
 
 Vercel → project **frontend** → Settings → Environment Variables:
 
 | Tên | Giá trị |
 |---|---|
 | `VITE_API_BASE_URL` | `https://clarivo-phi.vercel.app` |
-| `VITE_LOCAL_AI_BASE_URL` | địa chỉ tunnel ở bước 3.3 |
 
 Rồi **Deployments → Redeploy**.
 
-> `VITE_*` được **nhúng vào lúc build**, không đọc lúc chạy. Đổi giá trị là
-> **bắt buộc phải build lại**.
+> `VITE_LOCAL_AI_BASE_URL` **không còn bắt buộc**. Địa chỉ Giọng nói / Hình ảnh
+> nay đi theo đường link (`?ai=...`), đọc lúc chạy. Chỉ đặt biến này nếu bạn có
+> đường hầm cố định (Phần 4) và muốn trang tự nối mà không cần `?ai=`.
 
 ## 3.5 — Nghiệm thu
 
@@ -145,14 +183,18 @@ curl https://<dia-chi-tunnel>/api/health
 
 Phải thấy `"audio_ready": true, "vision_ready": true`.
 
-Rồi mở trang Vercel, kiểm 5 việc:
+Rồi mở **đường link mà `start-tunnel.bat` in ra** và kiểm 6 việc:
 
+- [ ] Góc trên bên phải hiện **Voice + Visual: ready** (chấm xanh)
 - [ ] Chọn một chủ đề → thấy nút **"+ Reference content"**
 - [ ] Nộp transcript → ra báo cáo nội dung
 - [ ] Tải lên một video → ra điểm **Giọng nói** và **Hình ảnh**
-- [ ] Đóng cửa sổ tunnel → tải lại trang → nội dung vẫn chạy, Hình ảnh báo
-      *"The machine that runs voice and visual analysis is offline right now"*
-- [ ] Mở lại `start-tunnel.bat` → **không** tải lại trang → Hình ảnh tự hiện lại
+- [ ] Đóng cửa sổ tunnel → chờ ~15 giây → chip đổi thành **offline**, nội dung
+      vẫn chạy bình thường
+- [ ] Mở lại `start-tunnel.bat`, dán link mới → Hình ảnh hiện lại
+
+> Nhờ người khác (khác máy, khác mạng — ví dụ điện thoại dùng 4G) mở thử đúng
+> đường link đó. Đây là phép thử thật: máy bạn thì địa chỉ nào cũng chạy.
 
 ---
 
@@ -168,14 +210,20 @@ Có hai loại đường hầm:
 | Địa chỉ | `abc-xyz.trycloudflare.com` | `ai.tenmiencuaban.com` |
 | **Đổi mỗi lần chạy?** | **Có** ❌ | **Không** ✅ |
 | Cần tài khoản Cloudflare? | Không | Có |
-| Cần tên miền? | Không | **Có** |
-| Phải redeploy Vercel mỗi lần? | **Có** | Không |
+| Cần tên miền? | Không | **Có (tốn tiền)** |
+| Phải gửi link mới mỗi lần? | **Có** | Không |
+| Phải redeploy Vercel mỗi lần? | Không | Không |
 
-Vấn đề của quick tunnel: `VITE_LOCAL_AI_BASE_URL` nhúng lúc build. Địa chỉ đổi
-→ phải sửa biến → phải redeploy → chờ vài phút. **Mỗi lần bật máy.**
+**Quick tunnel đã đủ dùng.** Từ khi trang đọc địa chỉ lúc chạy, quick tunnel
+không còn bắt bạn redeploy nữa — phiền duy nhất còn lại là mỗi lần chạy phải
+gửi lại đường link mới.
 
-Named tunnel gắn đường hầm vào một tên miền bạn sở hữu. Địa chỉ cố định vĩnh
-viễn → đặt `VITE_LOCAL_AI_BASE_URL` **một lần duy nhất**, không bao giờ đụng lại.
+Named tunnel giải quyết nốt phần đó: địa chỉ cố định vĩnh viễn, nên bạn đặt
+`VITE_LOCAL_AI_BASE_URL` một lần trên Vercel rồi thôi — link chia sẻ trở thành
+`https://clarivo-kohl.vercel.app` trơn, không cần `?ai=`.
+
+Đổi lại: **phải có tên miền, và tên miền tốn tiền**. Bản thân Cloudflare Tunnel
+và tài khoản Cloudflare đều miễn phí, không giới hạn băng thông.
 
 ## Điều kiện
 
@@ -293,8 +341,9 @@ Xong. Từ nay mỗi lần chỉ cần bấm đúp `start-tunnel.bat`, không ph
 - [ ] Mở `start-tunnel.bat`, đợi cả 2 cửa sổ chạy ổn định.
 - [ ] Thử toàn bộ từ **một máy khác** (điện thoại dùng 4G là cách kiểm nhanh
       nhất — nó chắc chắn không đi qua mạng nhà bạn).
-- [ ] Nếu còn dùng quick tunnel: cập nhật `VITE_LOCAL_AI_BASE_URL` và redeploy
-      **trước**, rồi mới demo.
+- [ ] Gửi **đường link mới** mà `start-tunnel.bat` vừa in ra (địa chỉ tunnel
+      đổi mỗi lần chạy, nên link của hôm qua đã chết).
+- [ ] Mở link đó trên máy khác, xác nhận góc phải hiện **Voice + Visual: ready**.
 
 ---
 
@@ -303,7 +352,9 @@ Xong. Từ nay mỗi lần chỉ cần bấm đúp `start-tunnel.bat`, không ph
 | Hiện tượng | Nguyên nhân thường gặp |
 |---|---|
 | "Failed to fetch", console báo CORS | `ALLOWED_ORIGINS` không khớp **chính xác** địa chỉ frontend |
-| Giọng nói / Hình ảnh luôn "unavailable" | Chưa redeploy sau khi đặt `VITE_LOCAL_AI_BASE_URL`; hoặc chưa chạy `start-tunnel.bat` |
+| Giọng nói / Hình ảnh luôn "unavailable" | Mở bằng link **không có** `?ai=...`; hoặc chưa chạy `start-tunnel.bat` |
+| Người khác không dùng được nhưng máy bạn thì được | Bạn đang mở `localhost`, họ mở Vercel. Gửi đúng link `?ai=...` |
+| Link hôm qua nay không chạy | Quick tunnel đổi địa chỉ mỗi lần chạy. Gửi link mới |
 | Đang chạy tự nhiên dừng | Máy ngủ, hoặc lỡ đóng một trong 2 cửa sổ đen |
 | Upload video bị từ chối vì dung lượng | Kiểm `limits.max_video_bytes` ở `/api/health` của tunnel |
 | Tải video lên nhưng transcript trống | Bình thường nếu video không có tiếng. Cứ tự gõ transcript — Hình ảnh vẫn chấm được |

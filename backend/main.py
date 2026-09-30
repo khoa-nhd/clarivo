@@ -51,9 +51,24 @@ def _allowed_origins() -> list[str]:
     return list(dict.fromkeys(defaults + configured))
 
 
+def _allowed_origin_regex() -> str | None:
+    """Pattern for origins that cannot be listed one by one.
+
+    Vercel gives every deployment its own hostname - a preview build, or the
+    project renamed - and a frontend served from one of those is refused by the
+    browser with an opaque CORS error that looks exactly like the backend being
+    down. Requests carry no credentials (``allow_credentials`` is False), so a
+    pattern scoped to one project's deployments costs nothing beyond letting
+    those pages call this machine.
+    """
+    raw = os.getenv("ALLOWED_ORIGIN_REGEX", "").strip()
+    return raw or None
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins(),
+    allow_origin_regex=_allowed_origin_regex(),
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type"],
