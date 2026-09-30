@@ -39,6 +39,14 @@ if not exist "%ROOT%\backend\local_scoring\models\face" goto :no_models
 where cloudflared >nul 2>&1
 if not %errorlevel%==0 goto :no_cloudflared
 
+REM  Cong 8000 con ai giu khong?
+REM
+REM  Neu mot backend cu van chay, uvicorn moi khong bind duoc cong - nhung
+REM  buoc kiem tra /api/health ben duoi VAN PASS, vi backend cu tra loi. Script
+REM  se chay tiep va mo duong ham toi tien trinh cu. Bat o day cho ro rang.
+netstat -ano | findstr /R /C:"LISTENING" | findstr /C:":%PORT% " >nul 2>&1
+if %errorlevel%==0 goto :port_busy
+
 REM ----------------------------------------------------------------------
 REM  2. Bat backend AI
 REM     --reload bi tat: day la che do phuc vu cong khai, khong phai dev.
@@ -77,6 +85,27 @@ echo   moi hoat dong. Dong 2 cua so vua hien ra la tat het.
 echo.
 pause
 exit /b 0
+
+:port_busy
+echo.
+echo  [DUNG LAI] Cong %PORT% dang co tien trinh khac giu.
+echo.
+echo        Thuong la mot cua so "Clarivo AI backend" tu lan chay truoc
+echo        van chua tat, hoac start.bat dang mo.
+echo.
+echo        Neu cu chay tiep, backend moi se KHONG khoi dong duoc, con
+echo        duong ham thi noi vao backend cu - va link chia se se tro
+echo        vao dung cai backend ban tuong la da tat.
+echo.
+echo        Cach xu ly: dong HET cac cua so den dang mo (Clarivo AI
+echo        backend, Clarivo tunnel, Clarivo frontend), roi chay lai file
+echo        nay.
+echo.
+echo        Xem tien trinh nao dang giu cong:
+echo            netstat -ano ^| findstr :%PORT%
+echo.
+pause
+exit /b 1
 
 REM ----------------------------------------------------------------------
 :no_venv

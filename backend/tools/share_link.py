@@ -52,16 +52,24 @@ def frontend_url(env: dict[str, str | None]) -> str:
 
 
 def wait_for_tunnel(log_path: Path, timeout_seconds: float) -> str:
-    """Poll cloudflared's log until it announces the hostname."""
+    """Poll cloudflared's log until it announces the hostname.
+
+    The *last* hostname in the file is the live one. `start-tunnel.bat` deletes
+    the log first, but Windows refuses to delete a file another cloudflared
+    still holds open - so a tunnel left running from earlier keeps appending,
+    and the file ends up holding that dead hostname ahead of the new one.
+    Reading the first match handed out a link to a tunnel that had already
+    stopped, which is indistinguishable from the machine being off.
+    """
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         try:
             text = log_path.read_text(encoding="utf-8", errors="replace")
         except FileNotFoundError:
             text = ""
-        match = TUNNEL_URL.search(text)
-        if match:
-            return match.group(0)
+        found = TUNNEL_URL.findall(text)
+        if found:
+            return found[-1]
         time.sleep(0.5)
     return ""
 

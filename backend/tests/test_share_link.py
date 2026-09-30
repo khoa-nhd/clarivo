@@ -74,3 +74,27 @@ def test_missing_configuration_is_not_an_error():
 
 def test_the_pattern_ignores_a_lookalike_domain():
     assert TUNNEL_URL.search("https://evil-trycloudflare.com.attacker.example") is None
+
+
+def test_the_newest_hostname_wins_when_an_old_tunnel_kept_writing(tmp_path):
+    """The exact failure this caused: a link to a tunnel that had stopped.
+
+    start-tunnel.bat deletes the log before starting, but Windows will not
+    delete a file a still-running cloudflared holds open. The old process keeps
+    appending, so its dead hostname sits above the new one.
+    """
+    log = tmp_path / "tunnel.log"
+    log.write_text(
+        "INF |  https://old-and-dead-1111.trycloudflare.com  |\n"
+        "INF |  https://new-and-live-2222.trycloudflare.com  |\n",
+        encoding="utf-8",
+    )
+    assert wait_for_tunnel(log, 1.0) == "https://new-and-live-2222.trycloudflare.com"
+
+
+def test_a_single_hostname_repeated_is_still_that_hostname(tmp_path):
+    """cloudflared reprints the URL on reconnect; that is not a new tunnel."""
+    log = tmp_path / "tunnel.log"
+    line = "INF |  https://steady-4444.trycloudflare.com  |\n"
+    log.write_text(line * 3, encoding="utf-8")
+    assert wait_for_tunnel(log, 1.0) == "https://steady-4444.trycloudflare.com"
