@@ -171,9 +171,19 @@ Vercel → project **frontend** → Settings → Environment Variables:
 
 Rồi **Deployments → Redeploy**.
 
-> `VITE_LOCAL_AI_BASE_URL` **không còn bắt buộc**. Địa chỉ Giọng nói / Hình ảnh
-> nay đi theo đường link (`?ai=...`), đọc lúc chạy. Chỉ đặt biến này nếu bạn có
-> đường hầm cố định (Phần 4) và muốn trang tự nối mà không cần `?ai=`.
+> ⚠️ **Nếu trên Vercel đang có biến `VITE_LOCAL_AI_BASE_URL` — hãy XOÁ nó đi**
+> (Settings → Environment Variables → dấu ba chấm → Remove → rồi Redeploy).
+>
+> Biến đó nhúng lúc build. Nếu nó đang trỏ tới một địa chỉ quick tunnel cũ (đã
+> chết), thì người mở trang **không kèm** `?ai=...` sẽ thấy *Voice + Visual:
+> offline* — cả Giọng nói lẫn Hình ảnh đều tắt.
+>
+> Xoá nó đi thì người mở trang trơn sẽ thấy *Voice ready · Visual off*: Giọng
+> nói vẫn chấm được bằng backend Vercel, chỉ Hình ảnh là cần tunnel. Đó là mặc
+> định đúng hơn.
+>
+> Chỉ đặt lại biến này khi bạn có **đường hầm cố định** (Phần 4) — địa chỉ không
+> đổi nên nhúng lúc build mới có ý nghĩa.
 
 ## 3.5 — Nghiệm thu
 
