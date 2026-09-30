@@ -368,6 +368,10 @@ Xong. Từ nay mỗi lần chỉ cần bấm đúp `start-tunnel.bat`, không ph
 | Đang chạy tự nhiên dừng | Máy ngủ, hoặc lỡ đóng một trong 2 cửa sổ đen |
 | Upload video bị từ chối vì dung lượng | Kiểm `limits.max_video_bytes` ở `/api/health` của tunnel |
 | Tải video lên nhưng transcript trống | Bình thường nếu video không có tiếng. Cứ tự gõ transcript — Hình ảnh vẫn chấm được |
+| Upload video báo "Cannot read properties of null" | Backend Vercel đang chạy code cũ — vào project **backend** trên Vercel bấm Redeploy |
+| Upload video báo "could not transcribe" | Như trên. Bản sửa mới tự chuyển sang tunnel nên vẫn chạy được, chỉ chậm hơn |
+| Transcript thiếu một đoạn | Workers AI thỉnh thoảng lỗi một đoạn. Ô thông báo nói rõ thiếu mấy phút — gõ bù rồi phân tích |
+| Video 5 phút phiên âm rất lâu (~3 phút) | Đúng như vậy: audio bị cắt thành 6 đoạn 1 phút để lách giới hạn 4.5 MB và 100 giây |
 | Nội dung cũng hỏng | Đây là backend Vercel, không liên quan tunnel — kiểm `clarivo-phi.vercel.app/api/health` |
 | `cloudflared` báo lỗi config | Thiếu dòng `- service: http_status:404` ở cuối `ingress` |
 
