@@ -128,7 +128,16 @@ export default function VideoUploadPanel({
       const wavBlob = await compressedAudioToWav(file, 16000)
 
       setNotice('Creating transcript…')
-      const transcription = await transcribeAudio(wavBlob, { durationSeconds, topic })
+      const transcription = await transcribeAudio(wavBlob, {
+        durationSeconds,
+        topic,
+        // A long recording is transcribed a minute at a time, which can take
+        // well over a minute in total. Without this the panel sat on one
+        // unchanging line and looked hung.
+        onProgress: ({ done, total }) => setNotice(
+          total > 1 ? `Creating transcript… part ${Math.min(done + 1, total)} of ${total}` : 'Creating transcript…',
+        ),
+      })
       const transcriptText = transcription.text || ''
       setTranscript(transcriptText)
 
@@ -143,10 +152,17 @@ export default function VideoUploadPanel({
       // microphone, a silent audio track, or simply nobody speaking. Saying
       // "transcript ready" for an empty box would leave the user staring at a
       // disabled submit button with no idea why.
+      // A long recording is transcribed a minute at a time. If one of those
+      // minutes failed, the rest is still worth keeping - but saying
+      // "transcript ready" over a transcript with a hole in it would send the
+      // user into analysis believing it complete.
+      const missing = Number(transcription.missing_parts) || 0
       setNotice(
-        transcriptText.trim()
-          ? 'Transcript ready. Review it before analysis.'
-          : 'No speech was detected in this video. Visual analysis will still run - type or paste what you said into the transcript box below to get content and voice feedback too.',
+        missing > 0
+          ? `Transcript is incomplete: ${missing} of ${transcription.total_parts} one-minute sections could not be transcribed. Fill the gaps in the box below before analysing, or upload again.`
+          : transcriptText.trim()
+            ? 'Transcript ready. Review it before analysis.'
+            : 'No speech was detected in this video. Visual analysis will still run - type or paste what you said into the transcript box below to get content and voice feedback too.',
       )
 
       onMediaReady?.({

@@ -16,6 +16,7 @@
 // because it can be supplied at runtime by a shared link or the in-app field -
 // see services/localAiConfig.js.
 import { resolveLocalAiBase } from './localAiConfig.js'
+import { splitWavForTranscription } from './audioProcessing.js'
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
 
@@ -90,21 +91,138 @@ function errorMessage(response, payload) {
     : detail?.message || payload?.message || `Request failed (${response.status})`
 }
 
-export async function transcribeAudio(blob, { durationSeconds = 0, topic = '' } = {}) {
-  const extension = blob.type.includes('ogg') ? 'ogg' : blob.type.includes('mp4') ? 'm4a' : 'webm'
-  const formData = new FormData()
-  formData.append('audio', blob, `presentation.${extension}`)
-  formData.append('duration_seconds', String(durationSeconds || 0))
-  formData.append('topic', topic || '')
+/** Where a transcription request should go.
+ *
+ * Transcription normally belongs to the always-on backend: it needs only the
+ * Cloudflare credentials, which both backends have. But the hosted one sits
+ * behind a 4.5 MB platform request cap, and the extracted audio of a video
+ * passes that at roughly two minutes - so for a five-minute recording the
+ * hosted backend is simply the wrong address, and the request fails before any
+ * code runs. Send those to the tunnel instead, which has no such ceiling.
+ */
+function transcriptionTargets(blob) {
+  const hosted = apiUrl('/api/transcribe')
+  if (!hasDedicatedLocalAi()) return [hosted]
+  const local = localAiUrl('/api/transcribe')
+  const tooBigForHosted = isHostedApi() && blob && blob.size > HOSTED_UPLOAD_LIMIT_BYTES
+  // Either way the other one is kept as a fallback: the tunnel may be off, and
+  // the hosted backend may refuse a size the tunnel would have taken.
+  return tooBigForHosted ? [local, hosted] : [hosted, local]
+}
 
-  const response = await fetch(apiUrl('/api/transcribe'), {
-    method: 'POST',
-    body: formData,
-  })
+/** Transcribe one piece. Throws with a readable message on every failure. */
+async function transcribeOne(blob, { durationSeconds, topic, failed }) {
+  const extension = blob.type.includes('wav') ? 'wav'
+    : blob.type.includes('ogg') ? 'ogg'
+      : blob.type.includes('mp4') ? 'm4a' : 'webm'
+  const buildBody = () => {
+    const formData = new FormData()
+    formData.append('audio', blob, `presentation.${extension}`)
+    formData.append('duration_seconds', String(durationSeconds || 0))
+    formData.append('topic', topic || '')
+    return formData
+  }
 
-  const payload = await readPayload(response)
-  if (!response.ok) throw new Error(errorMessage(response, payload))
-  return payload
+  // A long recording is sent a minute at a time. Once one address has failed,
+  // every later piece would otherwise repeat the same doomed upload before
+  // falling back - six wasted megabyte uploads on a five-minute recording.
+  const all = transcriptionTargets(blob)
+  const usable = all.filter((url) => !failed?.has(url))
+  const targets = usable.length ? usable : all
+
+  let lastError = null
+  for (const [index, url] of targets.entries()) {
+    const isLast = index === targets.length - 1
+    // Workers AI intermittently answers "Failed to decode audio file" for a
+    // file it accepted moments earlier - seen mid-way through a six-piece
+    // recording whose pieces the browser's own decoder all read without
+    // complaint. One retry turns that from a lost transcript into a pause.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        // A body over the platform cap is rejected by the edge before any CORS
+        // header is attached, so the browser reports it as a bare network error
+        // rather than a status. Treat that like any other failure and move on.
+        const response = await fetch(url, { method: 'POST', body: buildBody() })
+        const payload = await readPayload(response)
+        if (!response.ok) throw new Error(errorMessage(response, payload))
+        // A 2xx whose body is not an object - an empty body, or the literal
+        // `null` - used to be handed back as-is, and the caller crashed reading
+        // `.text` off it. That surfaced as "Cannot read properties of null",
+        // which says nothing about the backend having answered strangely.
+        if (!payload || typeof payload !== 'object') {
+          throw new Error(
+            'The transcription service answered without a transcript. Retry, or type the transcript in by hand.',
+          )
+        }
+        return payload
+      } catch (error) {
+        lastError = error
+        if (attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 1500))
+          continue
+        }
+        // Both attempts failed, so this address is not worth trying for the
+        // remaining pieces.
+        failed?.add(url)
+        if (isLast) throw error
+      }
+    }
+  }
+  throw lastError || new Error('Transcription failed.')
+}
+
+export async function transcribeAudio(blob, { durationSeconds = 0, topic = '', onProgress } = {}) {
+  const pieces = await splitWavForTranscription(blob)
+  // Shared across the pieces so a backend that has already failed is not tried
+  // again for every one of them.
+  const failed = new Set()
+  if (pieces.length === 1) {
+    onProgress?.({ done: 0, total: 1 })
+    return transcribeOne(pieces[0], { durationSeconds, topic, failed })
+  }
+
+  // Sequentially, not in parallel: the backend talks to one Workers AI account
+  // and several large uploads at once is how a rate limit is met.
+  const texts = []
+  let words = 0
+  let model = null
+  let missingParts = 0
+  let lastError = null
+  for (const [index, piece] of pieces.entries()) {
+    onProgress?.({ done: index, total: pieces.length })
+    try {
+      const part = await transcribeOne(piece, {
+        durationSeconds: durationSeconds / pieces.length,
+        topic,
+        failed,
+      })
+      const text = typeof part.text === 'string' ? part.text.trim() : ''
+      if (text) texts.push(text)
+      words += Number(part.word_count) || 0
+      model = model || part.model
+    } catch (error) {
+      // One minute out of five failing must not throw away the other four.
+      // The transcript is editable, and the caller is told how much is
+      // missing so it can say so rather than presenting a quiet gap.
+      missingParts += 1
+      lastError = error
+    }
+  }
+  onProgress?.({ done: pieces.length, total: pieces.length })
+
+  if (missingParts === pieces.length) throw lastError || new Error('Transcription failed.')
+
+  return {
+    text: texts.join(' '),
+    word_count: words,
+    duration_seconds: durationSeconds,
+    mime_type: blob.type || 'audio/wav',
+    size_bytes: blob.size,
+    model,
+    language: 'en',
+    missing_parts: missingParts,
+    total_parts: pieces.length,
+  }
 }
 
 export async function analyzeSession(session) {
