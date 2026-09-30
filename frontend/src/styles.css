@@ -1153,8 +1153,10 @@ button,
 .ai-address-save { background: var(--ink) !important; color: #fff !important; border-color: var(--ink) !important; }
 .ai-address-reset { color: var(--red) !important; }
 
-@media (max-width: 720px) {
-  .ai-address-chip { padding: 8px 10px; font-size: 11px; }
-  .ai-address-chip > span:last-child { display: none; }
-  .ai-address-chip { gap: 0; }
+.ai-address-short { display: none; }
+
+@media (max-width: 860px) {
+  .ai-address-chip { padding: 8px 11px; font-size: 11px; }
+  .ai-address-long { display: none; }
+  .ai-address-short { display: inline; }
 }

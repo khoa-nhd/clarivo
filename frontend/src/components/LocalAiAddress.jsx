@@ -49,6 +49,12 @@ export default function LocalAiAddress({
     partial: audioReady ? 'Voice ready · Visual off' : 'Visual ready · Voice off',
     ready: 'Voice + Visual: ready',
   }[state]
+  const shortLabel = {
+    unset: 'AI: off',
+    offline: 'AI: offline',
+    partial: audioReady ? 'Visual off' : 'Voice off',
+    ready: 'AI: on',
+  }[state]
 
   function handleSubmit(event) {
     event.preventDefault()
@@ -70,9 +76,15 @@ export default function LocalAiAddress({
         className={`ai-address-chip ai-address-${state}`}
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
+        aria-label={`${label}. Change the address.`}
+        title={label}
       >
         <span className="ai-address-dot" aria-hidden="true" />
-        <span>{label}</span>
+        {/* Two labels rather than one hidden below a breakpoint: a bare
+            coloured dot tells a phone visitor nothing, and this is the control
+            they need when the link they were sent has gone stale. */}
+        <span className="ai-address-long">{label}</span>
+        <span className="ai-address-short">{shortLabel}</span>
       </button>
 
       {open && (
