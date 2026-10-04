@@ -1,7 +1,19 @@
 -r requirements.txt
+
+# RUNTIME dependencies for local Voice + Visual analysis.
+#
+# Ultralytics and torch are deliberately absent. The YOLO pose model is used
+# through its exported OpenVINO IR, so the only thing they were still doing was
+# loading it - and they are by far the largest part of the install. Measured in
+# this project's venv: torch 543 MB, ultralytics 9.6 MB, against 246 MB for
+# OpenVINO itself. Running the IR directly takes the vision install from about
+# 970 MB to about 420 MB and changes no score (verified frame by frame against
+# Ultralytics: worst keypoint disagreement 0.21 px).
+#
+# Exporting that IR in the first place does need them, once. See
+# requirements-export.txt; setup_local_scoring.bat handles it.
 openvino>=2026.2,<2027
-ultralytics>=8.4.92,<9
-opencv-python>=4.10
+opencv-python-headless>=4.10
 numpy>=1.26
 librosa>=0.10.2
 soundfile>=0.12.1

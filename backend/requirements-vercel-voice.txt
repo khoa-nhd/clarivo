@@ -19,7 +19,14 @@
 # Measured on this project:
 #   requirements.txt alone ................  ~20 MB   (well under the limit)
 #   + these three lines ................... ~434 MB   (Python limit is 500 MB)
-#   + the full local stack ................ ~1.7 GB   (needs Large Functions beta)
+#   + the vision runtime .................. ~779 MB   (over, even without torch)
+#
+# Re-measured after ultralytics and torch were removed from the vision runtime.
+# Vision alone is openvino 245 MB + opencv 112 MB + numpy 51 MB = 408 MB, plus
+# 58 MB of weights: 466 MB, which does fit. But voice costs another ~313 MB -
+# librosa pulls in llvmlite 116 MB, scipy 110 MB and scikit-learn 41 MB - so the
+# two together do not, and dropping voice to gain vision is a poor trade when
+# the browser can run the vision models for free.
 #
 # The hard blocker for VIDEO is not size, it is Vercel's 4.5 MB request body
 # limit: a camera recording cannot reach the function at all. Audio can, but

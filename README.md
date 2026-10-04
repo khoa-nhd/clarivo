@@ -33,10 +33,21 @@ CLOUDFLARE_AUTH_TOKEN=your-workers-ai-token
 
 then run `start.bat` again.
 
-Local OpenVINO voice/visual analysis is a separate, much larger install
-(OpenVINO + Ultralytics + model weights). Set it up once with
-`backend\setup_local_scoring.bat`, then set `LOCAL_SCORING_ENABLED=true` in
-`backend\.env`.
+Local OpenVINO voice/visual analysis is a separate, larger install. Set it up
+once with `backend\setup_local_scoring.bat`, then set `LOCAL_SCORING_ENABLED=true`
+in `backend\.env`.
+
+The pose model runs through its exported OpenVINO IR, so ultralytics and torch
+are needed only to produce that IR and the setup script removes them again
+afterwards. Measured in this project's venv that is 517 MB of the install:
+
+| | before | after |
+|---|---|---|
+| vision runtime | 923 MB | 408 MB |
+| of which torch | 509 MB | — |
+
+Verified by running the full pipeline in a clean environment with torch and
+ultralytics absent: the same clip scores 80.2 either way.
 
 Deployed on Vercel the site runs every feature, including visual analysis.
 

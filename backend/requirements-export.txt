@@ -1,0 +1,11 @@
+# SETUP-ONLY dependencies: downloading the YOLO pose model and exporting it to
+# OpenVINO IR. Needed once, by local_scoring/setup_delivery_models.py.
+#
+# Not in requirements-local.txt on purpose. torch is 543 MB and is used here
+# only to load a model that is then converted and never loaded that way again,
+# so keeping it out of the runtime install is most of the difference between a
+# ~970 MB vision environment and a ~420 MB one.
+#
+# After setup has produced local_scoring/models/, these can be removed:
+#     pip uninstall -y ultralytics torch torchvision
+ultralytics>=8.4.92,<9

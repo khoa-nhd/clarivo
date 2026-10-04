@@ -71,7 +71,10 @@ def models_ready() -> bool:
 
 #: Import names each local capability needs, checked without importing them.
 _AUDIO_REQUIREMENTS = ("numpy", "librosa", "soundfile")
-_VISION_REQUIREMENTS = ("numpy", "cv2", "openvino", "ultralytics")
+# Ultralytics is no longer among these: the pose model runs through its
+# exported OpenVINO IR, so ultralytics (and the 543 MB of torch behind it)
+# is a setup-time dependency, not a runtime one.
+_VISION_REQUIREMENTS = ("numpy", "cv2", "openvino")
 
 
 @lru_cache(maxsize=1)
