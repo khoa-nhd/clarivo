@@ -1000,47 +1000,77 @@ def _robust_posture_score(values: list[float]) -> float:
     return clamp(0.60 * float(np.median(arr)) + 0.40 * float(np.percentile(arr, 25)))
 
 
-def analyze_video(
-    video_path: str | Path,
+
+
+#: One sampled frame, as the models saw it. This is the entire contract between
+#: the half of the pipeline that runs models and the half that scores.
+#:
+#:   face_count     how many faces the detector returned
+#:   head_pose      (yaw, pitch, roll) in degrees, or None when there is no face
+#:   gaze           (yaw, pitch, reliability) or None when gaze was not usable
+#:   pose           {"xy": [[x, y], ...], "conf": [...]} in COCO order, or None
+#:   pose_attempted whether the pose model was run on this frame at all
+#:
+#: Angles are degrees, camera-relative, positive yaw to the subject's left. The
+#: scorer calibrates away any systematic bias, so a source whose zero differs
+#: from OpenVINO's is still scored correctly - but the *units* must match.
+VISION_FRAME_KEYS = ("face_count", "head_pose", "gaze", "pose", "pose_attempted")
+
+
+def _frame_head_pose(record: dict[str, Any]) -> tuple[float, float, float] | None:
+    """Read (yaw, pitch, roll) from a frame record, or None if unusable.
+
+    A face box without a head pose is treated as no face: every downstream rule
+    is expressed in angles, and inventing one would be worse than admitting the
+    frame carries no orientation evidence.
+    """
+    if not _safe_float(record.get("face_count"), 0.0) >= 1.0:
+        return None
+    raw = record.get("head_pose")
+    if raw is None:
+        return None
+    try:
+        yaw, pitch, roll = (float(raw[0]), float(raw[1]), float(raw[2]))
+    except (TypeError, ValueError, IndexError):
+        return None
+    if not all(math.isfinite(v) for v in (yaw, pitch, roll)):
+        return None
+    return yaw, pitch, roll
+
+
+def _frame_gaze(record: dict[str, Any]) -> tuple[float, float, float] | None:
+    raw = record.get("gaze")
+    if raw is None:
+        return None
+    try:
+        yaw, pitch, rel = (float(raw[0]), float(raw[1]), float(raw[2]))
+    except (TypeError, ValueError, IndexError):
+        return None
+    if not all(math.isfinite(v) for v in (yaw, pitch, rel)):
+        return None
+    return yaw, pitch, rel
+
+
+def score_timeline(
+    frames: list[dict[str, Any]],
     *,
-    face_model: str | Path,
-    head_pose_model: str | Path,
-    landmarks_model: str | Path | None = None,
-    gaze_model: str | Path | None = None,
-    pose_model_dir: str | Path = "",
-    device: str,
-    pose_device: str,
-    cache_dir: str | Path,
+    duration_seconds: float,
+    duration_source: str,
     cfg: VisionConfig | None = None,
-) -> dict[str,Any]:
-    cfg=cfg or VisionConfig()
-    total_start=time.perf_counter()
-    head=OpenVINOHeadTracker(
-        Path(face_model),Path(head_pose_model),device,Path(cache_dir),
-        Path(landmarks_model) if landmarks_model else None,
-        Path(gaze_model) if gaze_model else None,
-    )
-    pose=PoseTracker(Path(pose_model_dir),pose_device,cfg.pose_confidence,cfg.pose_imgsz)
-    posture_cal = PostureCalibrator(cfg)
+    benchmark: dict[str, Any] | None = None,
+    source_fps: float = 0.0,
+    advanced_frames: int = 0,
+) -> dict[str, Any]:
+    """Score a sampled-frame timeline. Pure NumPy - no OpenCV, no OpenVINO.
 
-    cv2 = _cv2()
-    cap=cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot open video: {video_path}")
-    source_fps=_safe_float(cap.get(cv2.CAP_PROP_FPS), 0.0)
-    if not (1.0 <= source_fps <= 240.0):
-        # Live-recorded MediaRecorder WebM - the browser format this endpoint
-        # actually receives - frequently reports 0 or a nonsense frame rate.
-        source_fps = 30.0
-    total_src=int(_safe_float(cap.get(cv2.CAP_PROP_FRAME_COUNT), 0.0))
-    # Container duration, when the container has one. A browser WebM written by
-    # MediaRecorder usually has no frame count or duration header, so this stays
-    # 0.0 here and is replaced after the decode loop by the measured timeline.
-    # Leaving it at 0.0 used to reach the UI as "0 s" and, worse, collapsed the
-    # duration term of score_confidence to zero for every browser recording.
-    container_duration=total_src/source_fps if total_src>0 else 0.0
-    step=max(1,int(round(source_fps/max(cfg.sample_fps,.1))))
-
+    ``analyze_video`` calls this after decoding a file locally. The deployed
+    backend calls it with a timeline the browser produced, which is why the
+    split exists: the models are ~970 MB of wheels against a 500 MB serverless
+    limit, and a camera recording cannot even reach a serverless function
+    through a 4.5 MB request body cap. A timeline is a few hundred kilobytes of
+    JSON and carries exactly the evidence the scoring needs.
+    """
+    cfg = cfg or VisionConfig()
     sampled=forward=looking=away=direct=0
     face_counts=[]; yaws=[]; pitches=[]; rolls=[]
     orientation_states: list[str] = []
@@ -1059,46 +1089,21 @@ def analyze_video(
     pose_valid=pose_attempts=0
     gesture_tracker=GestureTracker(cfg)
     kp_visible={name:0 for name in ("left_shoulder","right_shoulder","left_hip","right_hip","left_elbow","right_elbow","left_wrist","right_wrist")}
-    idx=0
-    advanced_frames=0
-    last_frame_msec=0.0
-    # Per-stage wall clock. Without this split the only way to answer "what is
-    # slow?" is to guess; for a multi-minute clip at 2 fps sampling the answer
-    # is usually container decode, not model inference.
-    stage_seconds = {"decode": 0.0, "face": 0.0, "head_pose": 0.0, "gaze": 0.0, "pose": 0.0}
-    inf_start=time.perf_counter()
-    while True:
-        if idx % step != 0:
-            # Skipped frames are advanced with grab(), which demuxes without
-            # running the full decode+colour-convert that read() performs. At
-            # the default 2 fps sampling of 30 fps video this avoids decoding
-            # 14 of every 15 frames, and decode - not inference - dominates the
-            # wall clock for a several-minute recording.
-            _t0 = time.perf_counter()
-            grabbed = cap.grab()
-            stage_seconds["decode"] += time.perf_counter() - _t0
-            if not grabbed:
-                break
-            idx += 1
-            advanced_frames += 1
-            continue
-        _t0 = time.perf_counter()
-        ok,frame=cap.read()
-        stage_seconds["decode"] += time.perf_counter() - _t0
-        if not ok:
-            break
-        advanced_frames += 1
-        # Presentation timestamp of the frame just read. This is the only
-        # duration source that works for browser WebM without a duration header.
-        position_msec = _safe_float(cap.get(cv2.CAP_PROP_POS_MSEC), 0.0)
-        if position_msec > last_frame_msec:
-            last_frame_msec = position_msec
+    if not frames:
+        # Scoring nothing as zero is indistinguishable from scoring a very bad
+        # talk. The browser reaches this when the camera was blocked or the
+        # recording decoded to no frames, and the caller turns it into a 422.
+        raise RuntimeError("Vision timeline contained no sampled frames")
+    posture_cal = PostureCalibrator(cfg)
+    sampled = 0
+    duration = float(duration_seconds)
+
+    for _record in frames:
         sampled+=1
         posture_timeline.append(None)
-        _t0 = time.perf_counter()
-        faces=head.detect_faces(frame,cfg.face_confidence)
-        stage_seconds["face"] += time.perf_counter() - _t0
-        face_counts.append(len(faces))
+        _head_pose = _frame_head_pose(_record)
+        faces = [] if _head_pose is None else [None]
+        face_counts.append(int(_safe_float(_record.get("face_count"), 0.0)))
         current_roll=0.0
         current_forward=False
         if not faces:
@@ -1117,22 +1122,14 @@ def analyze_video(
                 head_pose_samples.append(None)
         else:
             face_missing_run = 0
-            face=max(faces,key=lambda f:(f[2]-f[0])*(f[3]-f[1]))
-            _t0 = time.perf_counter()
-            yaw,pitch,roll=head.head_pose(frame,face)
-            stage_seconds["head_pose"] += time.perf_counter() - _t0
+            yaw, pitch, roll = _head_pose
             current_roll=roll
             yaws.append(yaw); pitches.append(pitch); rolls.append(roll)
             head_pose_samples.append((float(yaw), float(pitch)))
             # The configured limit is the limit. The previous max(..., 45.0)
             # floor meant the config value could only ever be raised, never
             # lowered, so calibrating it below 45 degrees silently did nothing.
-            _t0 = time.perf_counter()
-            gaze_result=head.gaze_angles(
-                frame, face, (yaw, pitch, roll),
-                float(cfg.gaze_head_disagreement_limit_deg),
-            )
-            stage_seconds["gaze"] += time.perf_counter() - _t0
+            gaze_result=_frame_gaze(_record)
             if gaze_result is not None:
                 gy,gp,grel=gaze_result
                 # Only trust gaze when the eye crops are large enough. Blend a small
@@ -1157,11 +1154,9 @@ def analyze_video(
                 orientation_states.append("off_axis")
 
         pose_backed_flags.append(False)
-        if sampled%max(1,cfg.pose_every_n_samples)==0:
+        if bool(_record.get("pose_attempted")):
             pose_attempts += 1
-            _t0 = time.perf_counter()
-            p=pose.infer(frame)
-            stage_seconds["pose"] += time.perf_counter() - _t0
+            p=_record.get("pose")
             if p is not None:
                 if not faces:
                     # Face detector can miss a frame while the person/body tracker
@@ -1196,37 +1191,7 @@ def analyze_video(
                     # Only centered/engaged frames are allowed to contribute to the
                     # camera-relative warm-up. Off-axis frames can still be scored structurally.
                     posture_cal.add(pm,current_roll,face_forward=current_forward)
-        idx+=1
-    cap.release()
-    inf_seconds=time.perf_counter()-inf_start
-    total=time.perf_counter()-total_start
-    if sampled==0:
-        raise RuntimeError("Video contained no readable frames")
 
-    # Resolve the clip duration from the best evidence available, in order of
-    # trust. A browser recording normally has neither a frame count nor usable
-    # timestamps, so the decoded-frame count is the fallback that always works.
-    advanced_duration = advanced_frames / source_fps if advanced_frames > 0 else 0.0
-    timestamp_duration = last_frame_msec / 1000.0
-    if container_duration > 0.0:
-        duration = container_duration
-        duration_source = "container_frame_count"
-    elif timestamp_duration > 0.0:
-        duration = timestamp_duration
-        duration_source = "frame_timestamps"
-    else:
-        duration = advanced_duration
-        duration_source = "advanced_frame_count"
-    if duration <= 0.0:
-        duration = sampled / max(_safe_float(cfg.sample_fps, 0.1), 0.1)
-        duration_source = "sample_count_estimate"
-
-    # Every "sustained for N seconds" rule below converts seconds into a frame
-    # count. Using the *configured* sample_fps assumed the decoder delivered
-    # exactly that rate; when the container reports the wrong frame rate - which
-    # browser WebM routinely does - every temporal threshold was scaled by the
-    # same error, so a 2.5 s look-away rule could fire at 1.25 s or 5 s. Measure
-    # the rate that was actually achieved instead.
     effective_sample_fps = float(
         np.clip(sampled / duration if duration > 0 else cfg.sample_fps, 0.2, 60.0)
     )
@@ -1668,17 +1633,171 @@ def analyze_video(
     elif gesture_summary["level"] == "FREQUENT MOVEMENT":
         feedback.append("Frequent hand/arm movement was detected; review whether it supports your key points rather than distracts.")
 
-    # duration is already resolved against the best available evidence above.
-    effective=duration
     return {
         "vision_score":round(overall,1),
         "metrics":metrics,
         "scores":scores,
         "feedback":feedback[:6],
         "benchmark":{
+            **(benchmark or {}),
+        },
+    }
+
+
+def analyze_video(
+    video_path: str | Path,
+    *,
+    face_model: str | Path,
+    head_pose_model: str | Path,
+    landmarks_model: str | Path | None = None,
+    gaze_model: str | Path | None = None,
+    pose_model_dir: str | Path = "",
+    device: str,
+    pose_device: str,
+    cache_dir: str | Path,
+    cfg: VisionConfig | None = None,
+) -> dict[str,Any]:
+    cfg=cfg or VisionConfig()
+    total_start=time.perf_counter()
+    head=OpenVINOHeadTracker(
+        Path(face_model),Path(head_pose_model),device,Path(cache_dir),
+        Path(landmarks_model) if landmarks_model else None,
+        Path(gaze_model) if gaze_model else None,
+    )
+    pose=PoseTracker(Path(pose_model_dir),pose_device,cfg.pose_confidence,cfg.pose_imgsz)
+
+    cv2 = _cv2()
+    cap=cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video: {video_path}")
+    source_fps=_safe_float(cap.get(cv2.CAP_PROP_FPS), 0.0)
+    if not (1.0 <= source_fps <= 240.0):
+        # Live-recorded MediaRecorder WebM - the browser format this endpoint
+        # actually receives - frequently reports 0 or a nonsense frame rate.
+        source_fps = 30.0
+    total_src=int(_safe_float(cap.get(cv2.CAP_PROP_FRAME_COUNT), 0.0))
+    # Container duration, when the container has one. A browser WebM written by
+    # MediaRecorder usually has no frame count or duration header, so this stays
+    # 0.0 here and is replaced after the decode loop by the measured timeline.
+    # Leaving it at 0.0 used to reach the UI as "0 s" and, worse, collapsed the
+    # duration term of score_confidence to zero for every browser recording.
+    container_duration=total_src/source_fps if total_src>0 else 0.0
+    step=max(1,int(round(source_fps/max(cfg.sample_fps,.1))))
+
+    sampled=0
+    idx=0
+    advanced_frames=0
+    last_frame_msec=0.0
+    # Per-stage wall clock. Without this split the only way to answer "what is
+    # slow?" is to guess; for a multi-minute clip at 2 fps sampling the answer
+    # is usually container decode, not model inference.
+    stage_seconds = {"decode": 0.0, "face": 0.0, "head_pose": 0.0, "gaze": 0.0, "pose": 0.0}
+    inf_start=time.perf_counter()
+    frames: list[dict[str,Any]] = []
+    while True:
+        if idx % step != 0:
+            # Skipped frames are advanced with grab(), which demuxes without
+            # running the full decode+colour-convert that read() performs. At
+            # the default 2 fps sampling of 30 fps video this avoids decoding
+            # 14 of every 15 frames, and decode - not inference - dominates the
+            # wall clock for a several-minute recording.
+            _t0 = time.perf_counter()
+            grabbed = cap.grab()
+            stage_seconds["decode"] += time.perf_counter() - _t0
+            if not grabbed:
+                break
+            idx += 1
+            advanced_frames += 1
+            continue
+        _t0 = time.perf_counter()
+        ok,frame=cap.read()
+        stage_seconds["decode"] += time.perf_counter() - _t0
+        if not ok:
+            break
+        advanced_frames += 1
+        # Presentation timestamp of the frame just read. This is the only
+        # duration source that works for browser WebM without a duration header.
+        position_msec = _safe_float(cap.get(cv2.CAP_PROP_POS_MSEC), 0.0)
+        if position_msec > last_frame_msec:
+            last_frame_msec = position_msec
+        sampled+=1
+
+        record: dict[str,Any] = {
+            "face_count": 0, "head_pose": None, "gaze": None,
+            "pose": None, "pose_attempted": False,
+        }
+        _t0 = time.perf_counter()
+        faces=head.detect_faces(frame,cfg.face_confidence)
+        stage_seconds["face"] += time.perf_counter() - _t0
+        record["face_count"] = len(faces)
+        if faces:
+            face=max(faces,key=lambda f:(f[2]-f[0])*(f[3]-f[1]))
+            _t0 = time.perf_counter()
+            yaw,pitch,roll=head.head_pose(frame,face)
+            stage_seconds["head_pose"] += time.perf_counter() - _t0
+            record["head_pose"] = (float(yaw), float(pitch), float(roll))
+            # The configured limit is the limit. The previous max(..., 45.0)
+            # floor meant the config value could only ever be raised, never
+            # lowered, so calibrating it below 45 degrees silently did nothing.
+            _t0 = time.perf_counter()
+            gaze_result=head.gaze_angles(
+                frame, face, (yaw, pitch, roll),
+                float(cfg.gaze_head_disagreement_limit_deg),
+            )
+            stage_seconds["gaze"] += time.perf_counter() - _t0
+            if gaze_result is not None:
+                record["gaze"] = (
+                    float(gaze_result[0]), float(gaze_result[1]), float(gaze_result[2]),
+                )
+        if sampled%max(1,cfg.pose_every_n_samples)==0:
+            record["pose_attempted"] = True
+            _t0 = time.perf_counter()
+            record["pose"]=pose.infer(frame)
+            stage_seconds["pose"] += time.perf_counter() - _t0
+        frames.append(record)
+        idx+=1
+    cap.release()
+    if sampled==0:
+        raise RuntimeError("Video contained no readable frames")
+
+    # Resolve the clip duration from the best evidence available, in order of
+    # trust. A browser recording normally has neither a frame count nor usable
+    # timestamps, so the decoded-frame count is the fallback that always works.
+    advanced_duration = advanced_frames / source_fps if advanced_frames > 0 else 0.0
+    timestamp_duration = last_frame_msec / 1000.0
+    if container_duration > 0.0:
+        duration = container_duration
+        duration_source = "container_frame_count"
+    elif timestamp_duration > 0.0:
+        duration = timestamp_duration
+        duration_source = "frame_timestamps"
+    else:
+        duration = advanced_duration
+        duration_source = "advanced_frame_count"
+    if duration <= 0.0:
+        duration = sampled / max(_safe_float(cfg.sample_fps, 0.1), 0.1)
+        duration_source = "sample_count_estimate"
+
+    # Every "sustained for N seconds" rule below converts seconds into a frame
+    # count. Using the *configured* sample_fps assumed the decoder delivered
+    # exactly that rate; when the container reports the wrong frame rate - which
+    # browser WebM routinely does - every temporal threshold was scaled by the
+    # same error, so a 2.5 s look-away rule could fire at 1.25 s or 5 s. Measure
+    # the rate that was actually achieved instead.
+
+    inf_seconds=time.perf_counter()-inf_start
+    total=time.perf_counter()-total_start
+    return score_timeline(
+        frames,
+        duration_seconds=duration,
+        duration_source=duration_source,
+        cfg=cfg,
+        source_fps=source_fps,
+        advanced_frames=advanced_frames,
+        benchmark={
             "vision_inference_seconds":round(inf_seconds,3),
             "total_vision_analysis_seconds":round(total,3),
-            "video_realtime_factor_x":round(effective/max(total,1e-6),2),
+            "video_realtime_factor_x":round(duration/max(total,1e-6),2),
             "stage_seconds":{k: round(v, 3) for k, v in stage_seconds.items()},
             "stage_percent_of_loop":{
                 k: round(100.0 * v / max(inf_seconds, 1e-6), 1) for k, v in stage_seconds.items()
@@ -1695,4 +1814,4 @@ def analyze_video(
             "pose_used_device":pose.used_device or "NO_POSE_FRAME",
             "pose_imgsz":cfg.pose_imgsz,
         },
-    }
+    )
