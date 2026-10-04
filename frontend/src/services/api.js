@@ -25,21 +25,28 @@ export function isHostedApi() {
 
 // Vercel rejects a function request body larger than 4.5 MB with a 413 before
 // the request reaches any application code, so there is nothing the backend can
-// do about it. 4.4 MB leaves room for the multipart envelope.
-export const HOSTED_UPLOAD_LIMIT_BYTES = Math.floor(4.4 * 1024 * 1024)
+// do about it.
+//
+// The limit is 4.5 MB decimal, not 4.5 MiB. Measured against the deployed
+// backend: a 4,480,044 byte body reached the function, a 4,544,044 byte one was
+// refused at the edge. The previous value here was 4.4 MiB = 4,613,734 bytes,
+// which is above the real ceiling - so the browser believed a recording would
+// fit, uploaded it in full, and got a 413 it had promised would not happen.
+const PLATFORM_BODY_LIMIT_BYTES = 4_500_000
+
+// The audio is not the whole request: there is a multipart envelope and the
+// transcript field beside it, and the transcript may run to the backend's
+// 20,000-character ceiling.
+const REQUEST_OVERHEAD_BYTES = 64 * 1024
+
+export const HOSTED_UPLOAD_LIMIT_BYTES = PLATFORM_BODY_LIMIT_BYTES - REQUEST_OVERHEAD_BYTES
 
 // The browser uploads 16 kHz mono 16-bit WAV.
 const WAV_BYTES_PER_SECOND = 16000 * 2
 
-// The audio is not the whole request: there is a multipart envelope and the
-// transcript field beside it, and the transcript may run to the backend's
-// 20,000-character ceiling. Reserving room for both keeps a recording that the
-// browser accepted from being refused by the platform on arrival.
-const REQUEST_OVERHEAD_BYTES = 64 * 1024
-
 /** The longest recording whose WAV still fits the hosted request cap. */
 export function hostedAudioSecondsLimit() {
-  return Math.floor((HOSTED_UPLOAD_LIMIT_BYTES - REQUEST_OVERHEAD_BYTES) / WAV_BYTES_PER_SECOND)
+  return Math.floor(HOSTED_UPLOAD_LIMIT_BYTES / WAV_BYTES_PER_SECOND)
 }
 
 function describeLimit() {

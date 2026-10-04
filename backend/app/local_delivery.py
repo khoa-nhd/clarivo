@@ -39,12 +39,27 @@ def _env_path(name: str, default: Path) -> Path:
 
 
 def _cache_dir() -> Path:
+    """Where OpenVINO may cache compiled models.
+
+    A serverless function's code directory is read-only, so creating this there
+    raised ``OSError: [Errno 30] Read-only file system`` and took voice analysis
+    down with it - for a cache that path never uses. The transcript comes from
+    Cloudflare Whisper on the web, so no local model is ever compiled and
+    nothing is ever written here. Falling back to the system temp directory
+    keeps the local behaviour (a persistent cache that makes the second run
+    faster) without letting an unused directory fail the request.
+    """
     cache_dir = _env_path(
         "LOCAL_CACHE_DIR",
         Path(__file__).resolve().parent.parent / "local_scoring" / "cache",
     )
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    return cache_dir
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return cache_dir
+    except OSError:
+        fallback = Path(tempfile.gettempdir()) / "clarivo-openvino-cache"
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
 
 
 def models_dir() -> Path:
