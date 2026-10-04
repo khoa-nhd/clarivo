@@ -1,5 +1,4 @@
 import QueueSidebar from './components/QueueSidebar.jsx'
-import LocalAiAddress from './components/LocalAiAddress.jsx'
 import NewSessionForm from './components/NewSessionForm.jsx'
 import SessionView from './components/SessionView.jsx'
 import TutorialBanner from './components/TutorialBanner.jsx'
@@ -16,16 +15,6 @@ export default function App() {
           <span>Clarivo</span>
         </button>
         <div className="topbar-right">
-          <LocalAiAddress
-            baseUrl={queue.localAiBaseUrl}
-            fromLink={queue.localAiFromLink}
-            linkError={queue.localAiLinkError}
-            offline={queue.localAiOffline}
-            audioReady={queue.localAudioEnabled}
-            visionReady={queue.localVisionEnabled}
-            onApply={queue.applyLocalAiBaseUrl}
-            onRefresh={queue.refreshHealth}
-          />
           <button className="new-top-button" onClick={queue.startNewSession}>+ New session</button>
         </div>
       </header>
@@ -48,9 +37,6 @@ export default function App() {
           <NewSessionForm
             onSubmit={queue.addSession}
             queueCount={queue.counts.queued + queue.counts.processing}
-            visionEnabled={queue.localVisionEnabled}
-            uploadLimits={queue.uploadLimits}
-            localAiOffline={queue.localAiOffline}
           />
         )}
 

@@ -1,8 +1,20 @@
 import { useEffect, useRef, useState } from 'react'
-import { transcribeAudio } from '../services/api.js'
+import { hostedAudioSecondsLimit, isHostedApi, transcribeAudio } from '../services/api.js'
 import { compressedAudioToWav } from '../services/audioProcessing.js'
 
-const MAX_RECORDING_SECONDS = 5 * 60
+// How long a recording may run before it stops itself.
+//
+// Voice analysis is scored from 16 kHz mono WAV, which is 32 kB a second. A
+// serverless function refuses a request body over 4.5 MB before any code runs,
+// so on the deployed backend a five-minute recording could never be scored -
+// the user would have spoken for five minutes and then been told the upload was
+// too large. Stopping at a length the backend can actually accept says so
+// before they start instead of after they finish. Running locally there is no
+// such ceiling, so the full five minutes stands.
+const LOCAL_MAX_RECORDING_SECONDS = 5 * 60
+const MAX_RECORDING_SECONDS = isHostedApi()
+  ? Math.min(LOCAL_MAX_RECORDING_SECONDS, hostedAudioSecondsLimit())
+  : LOCAL_MAX_RECORDING_SECONDS
 const AUDIO_BITS_PER_SECOND = 48_000
 const VIDEO_BITS_PER_SECOND = 450_000
 
@@ -341,7 +353,7 @@ export default function VoiceTranscriptRecorder({
 
           <div className="audio-level-shell" aria-label="Microphone level">
             <div className="audio-level-track"><span style={{ width: `${Math.max(recording ? level * 100 : 0, recording ? 3 : 0)}%` }} /></div>
-            <small>{recording ? 'Mic level' : 'Up to 5 minutes'}</small>
+            <small>{recording ? 'Mic level' : `Up to ${formatDuration(MAX_RECORDING_SECONDS)}`}</small>
           </div>
 
           <div className="voice-recorder-controls">

@@ -38,15 +38,18 @@ Local OpenVINO voice/visual analysis is a separate, much larger install
 `backend\setup_local_scoring.bat`, then set `LOCAL_SCORING_ENABLED=true` in
 `backend\.env`.
 
-To publish with Voice + Visual working online for free, see
-`DEPLOY_TUNNEL.md` (Vercel for content, a Cloudflare Tunnel to this machine for
-the OpenVINO analysis).
+Deployed on Vercel, the backend serves transcription, content analysis, voice
+analysis and the Q&A drills. Visual analysis is local-only: OpenVINO and the
+model weights do not fit a serverless function, so `/api/health` reports it
+unavailable there and the UI hides it. Run the project locally for the full set.
+
+A recording is capped at the length whose 16 kHz WAV fits the 4.5 MB serverless
+request limit - about 2m24s deployed, the full 5 minutes locally.
 
 Other docs:
 - `RUN_LEARNING_LOOP_WINDOWS.md` — exact Windows commands
 - `LEARNING_LOOP_IMPLEMENTATION.md` — feature and architecture map
 - `backend/BENCHMARKS.md` — how to reproduce every accuracy/performance number
-- `DEPLOY_TUNNEL.md` — free public deploy with full features
 - `DEPLOY_PUBLIC_VERCEL.md` — serverless-only deploy and its platform limits
 
 ## Frontend starter library

@@ -1,14 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { analyzeAudioDelivery, analyzeSession, analyzeVisionDelivery, checkHealth, checkLocalAiHealth, evaluateDrillRound, finalizeDrillSession, generateDrillChallenges, hasDedicatedLocalAi } from '../services/api.js'
-import {
-  BUILD_TIME_LOCAL_AI_BASE,
-  clearLocalAiOverride,
-  getLinkAddressResult,
-  localAiIsOverridden,
-  resolveLocalAiBase,
-  setLocalAiOverride,
-  subscribeLocalAi,
-} from '../services/localAiConfig.js'
+import { analyzeAudioDelivery, analyzeSession, analyzeVisionDelivery, checkHealth, evaluateDrillRound, finalizeDrillSession, generateDrillChallenges } from '../services/api.js'
 import { deleteSessionAudio, getSessionAudio, saveSessionAudio } from '../services/audioStore.js'
 import { deleteSessionVideo, getSessionVideo, saveSessionVideo } from '../services/videoStore.js'
 
@@ -102,7 +93,6 @@ export function useSessionQueue() {
   const [sessions, setSessions] = useState(loadSessions)
   const [activeId, setActiveId] = useState(() => loadSessions()[0]?.id ?? null)
   const [backendHealth, setBackendHealth] = useState(null)
-  const [localAiBaseUrl, setLocalAiBaseUrl] = useState(resolveLocalAiBase)
   const inFlightIdRef = useRef(null)
   const sessionsRef = useRef(sessions)
   const backendHealthRef = useRef(null)
@@ -113,41 +103,11 @@ export function useSessionQueue() {
     return health
   }, [])
 
-  // Read both backends and merge them into one health object.
-  //
-  // The main backend describes the AI provider and the drill settings. When a
-  // dedicated voice/visual backend is configured, its own capability report
-  // replaces delivery_analysis - asking the serverless backend whether OpenVINO
-  // is available would always answer no, because it never runs it.
-  const probeHealth = useCallback(async () => {
-    const main = await checkHealth()
-    if (!hasDedicatedLocalAi()) return main
-    try {
-      const localAi = await checkLocalAiHealth()
-      return {
-        ...main,
-        delivery_analysis: {
-          ...(localAi?.delivery_analysis || {}),
-          served_by: 'local_ai_backend',
-        },
-      }
-    } catch {
-      // The machine behind the tunnel is off. Content and Q&A still work, so
-      // report only voice/visual as unavailable rather than failing outright.
-      return {
-        ...main,
-        delivery_analysis: {
-          enabled: false,
-          audio_ready: false,
-          vision_ready: false,
-          models_ready: false,
-          mode: 'offline',
-          served_by: 'local_ai_backend',
-          unreachable: true,
-        },
-      }
-    }
-  }, [])
+  // One backend, which reports its own capabilities. On Vercel it answers that
+  // voice analysis is available and visual is not - the OpenVINO models and the
+  // packages that read them do not fit a serverless function. Run the project
+  // locally and the same endpoint answers that both are available.
+  const probeHealth = useCallback(() => checkHealth(), [])
 
   // Re-read the backend capabilities. Returns the freshest value available.
   const refreshHealth = useCallback(async () => {
@@ -206,46 +166,6 @@ export function useSessionQueue() {
     }
   }, [refreshHealth])
 
-  // Keep watching while the voice/visual backend is offline.
-  //
-  // The retry loop above only fires when the health request itself fails, and
-  // once the backends were split that stopped covering this case: probeHealth
-  // handles an unreachable local-AI backend internally and returns a perfectly
-  // successful result that merely says "offline". So the machine behind the
-  // tunnel could come back and the page would never notice. This is the poll
-  // that closes that gap - one small GET while it is down, stopping as soon as
-  // it answers.
-  const localAiUnreachable = Boolean(
-    hasDedicatedLocalAi() && backendHealth?.delivery_analysis?.unreachable,
-  )
-  useEffect(() => {
-    if (!localAiUnreachable) return undefined
-    const timer = setInterval(() => {
-      if (document.visibilityState !== 'hidden') refreshHealth()
-    }, 15000)
-    return () => clearInterval(timer)
-  }, [localAiUnreachable, refreshHealth])
-
-  // The voice/visual address is no longer fixed at build time: a visitor can
-  // arrive on a link carrying `?ai=`, or paste a new tunnel address into the
-  // field. Re-probe the moment it changes, and drop the cached reading first so
-  // the new backend's own capabilities decide the chips rather than the old
-  // one's lingering answer.
-  useEffect(() => subscribeLocalAi((next) => {
-    setLocalAiBaseUrl(next)
-    backendHealthRef.current = null
-    refreshHealth()
-  }), [refreshHealth])
-
-  /** Point voice/visual at a different backend. Empty string restores the
-   *  address the site was built with. Throws if the text is not an address. */
-  const applyLocalAiBaseUrl = useCallback((raw) => {
-    const trimmed = String(raw ?? '').trim()
-    if (trimmed) return setLocalAiOverride(trimmed)
-    clearLocalAiOverride()
-    return BUILD_TIME_LOCAL_AI_BASE
-  }, [])
-
   useEffect(() => {
     sessionsRef.current = sessions
     localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions))
@@ -259,11 +179,6 @@ export function useSessionQueue() {
   const localVisionEnabled = visionAvailable(backendHealth)
   const localDeliveryEnabled = localAudioEnabled || localVisionEnabled
   const backendUnreachable = Boolean(backendHealth?.delivery_analysis?.unreachable)
-  // Distinguishes "this backend was never built to run it" from "the machine
-  // that runs it is currently off", which are very different things to tell a
-  // user staring at a disabled panel.
-  const localAiOffline = backendHealth?.delivery_analysis?.mode === 'offline'
-  const uploadLimits = backendHealth?.delivery_analysis?.limits ?? null
 
   useEffect(() => {
     if (inFlightIdRef.current) return
@@ -633,13 +548,7 @@ export function useSessionQueue() {
     localAudioEnabled,
     localVisionEnabled,
     backendUnreachable,
-    localAiOffline,
-    uploadLimits,
     refreshHealth,
-    localAiBaseUrl,
-    localAiFromLink: localAiIsOverridden(),
-    localAiLinkError: getLinkAddressResult()?.failure || '',
-    applyLocalAiBaseUrl,
     addSession,
     setActiveId,
     retrySession,

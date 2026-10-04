@@ -1,5 +1,10 @@
 # Optional: enables local VOICE analysis on the public Vercel backend.
 #
+# ALREADY APPLIED: these three lines are present in requirements.txt, so the
+# deployed backend scores voice once it is redeployed. This file is kept as
+# the explanation of why only voice and not visual, and of the size and
+# recording-length limits that choice carries.
+#
 # Vercel builds from backend/requirements.txt, so to use this you append these
 # three lines to that file - Vercel does not read this file directly. It is kept
 # separate so the default serverless bundle stays small (~20 MB) for anyone who
