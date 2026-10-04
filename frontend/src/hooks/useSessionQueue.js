@@ -251,9 +251,7 @@ export function useSessionQueue() {
    * everything would spend a content analysis and discard the Q&A progress for
    * no reason.
    */
-  const retryDelivery = useCallback(async (id) => {
-    const session = sessionsRef.current.find((item) => item.id === id)
-    if (!session || !(session.audio || session.video)) return
+  const runDeliveryRetry = useCallback(async (session, id) => {
     const health = await refreshHealth()
     patchSession(id, {
       deliveryError: null,
@@ -270,6 +268,26 @@ export function useSessionQueue() {
       analysisState: { ...(session.analysisState || {}), audio: audioState, vision: visionState },
     })
   }, [patchSession, refreshHealth, runDelivery])
+
+  const retryDelivery = useCallback(async (id) => {
+    // The queue worker and this share the browser's MediaPipe landmarkers,
+    // which are stateful singletons: two analyses running at once hand them
+    // interleaved timestamps and MediaPipe rejects the whole graph. The in-
+    // flight marker is the mutex for both, so a re-run waits its turn rather
+    // than corrupting the run already going.
+    if (inFlightIdRef.current) return
+    const session = sessionsRef.current.find((item) => item.id === id)
+    if (!session || !(session.audio || session.video)) return
+    inFlightIdRef.current = id
+    try {
+      await runDeliveryRetry(session, id)
+    } finally {
+      inFlightIdRef.current = null
+      // Nudge the queue effect, which is gated on the marker above.
+      setSessions((current) => [...current])
+    }
+  }, [runDeliveryRetry])
+
 
   useEffect(() => {
     if (inFlightIdRef.current) return

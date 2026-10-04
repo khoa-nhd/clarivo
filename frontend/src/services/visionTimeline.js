@@ -23,6 +23,9 @@ const POSE_MODEL = 'https://storage.googleapis.com/mediapipe-models/pose_landmar
 /** Sampling rate. Matches the backend default so the temporal rules line up. */
 export const SAMPLE_FPS = 2
 
+/** Matches the backend's own ceiling: 5,000 frames is 41 minutes at 2 fps. */
+const MAX_FRAMES = 5000
+
 // COCO order, which is what the scorer indexes. MediaPipe's pose model uses its
 // own 33-point layout, so the eight joints the posture and gesture rules read
 // have to be mapped across rather than passed through.
@@ -40,12 +43,30 @@ const COCO_INDEX = {
 let loaderPromise = null
 
 // MediaPipe's VIDEO mode requires timestamps that increase strictly over the
-// lifetime of the landmarker, not of one call. The landmarkers are reused
-// between analyses - reloading them costs tens of megabytes - so a second run
-// that restarted its clock at zero was rejected outright with "Packet timestamp
-// mismatch", meaning every session after the first failed. This cursor is never
-// rewound.
+// lifetime of the landmarker, not of one call, and the landmarkers are shared
+// singletons because reloading them costs tens of megabytes.
+//
+// This counter is therefore advanced once per sampled frame and never derived
+// from the position in the video and never rewound. An earlier version computed
+// the timestamp from a cursor read at the start of the run plus the frame's
+// offset, which looked monotonic but was not: two runs that overlapped both
+// read the same starting cursor, so the second run's first frame arrived at the
+// landmarker as timestamp 0 after the first run had already reached millions,
+// and MediaPipe rejected the whole graph.
+const TIMESTAMP_STEP_MS = 50
 let timestampCursor = 0
+
+function nextTimestamp() {
+  timestampCursor += TIMESTAMP_STEP_MS
+  return timestampCursor
+}
+
+// Overlapping runs are the other half of that bug, and no timestamp scheme
+// fixes them: `detectForVideo` is stateful per landmarker, so two interleaved
+// runs corrupt each other's graph regardless. They are serialised instead. In
+// the app this happens when a manual "re-run voice & visual" lands while the
+// queue is already analysing another session.
+let pending = Promise.resolve()
 
 async function loadModels() {
   if (!loaderPromise) {
@@ -193,30 +214,63 @@ function loadVideo(blob) {
  * @param {Blob} videoBlob the recording, which never leaves the browser
  * @param {{durationSeconds?: number, onProgress?: Function, signal?: AbortSignal}} options
  */
-export async function buildVisionTimeline(videoBlob, { durationSeconds = 0, onProgress, signal } = {}) {
+export function buildVisionTimeline(videoBlob, options = {}) {
+  const run = pending.then(
+    () => runTimeline(videoBlob, options),
+    () => runTimeline(videoBlob, options),
+  )
+  // Keep the chain alive after a failure, but do not let it reject unhandled.
+  pending = run.then(() => {}, () => {})
+  return run
+}
+
+/** Whether a failure is MediaPipe refusing a timestamp it has already passed. */
+function isTimestampFault(error) {
+  return /timestamp mismatch|not strictly monotonic/i.test(String(error?.message || error))
+}
+
+async function runTimeline(videoBlob, options) {
+  try {
+    return await sampleTimeline(videoBlob, options)
+  } catch (error) {
+    if (!isTimestampFault(error)) throw error
+    // The landmarker's graph is now in a state this code cannot talk its way
+    // out of. Drop it and build a fresh one rather than leaving visual analysis
+    // broken until the page is reloaded.
+    loaderPromise = null
+    return sampleTimeline(videoBlob, options)
+  }
+}
+
+async function sampleTimeline(videoBlob, { durationSeconds = 0, onProgress, signal } = {}) {
   if (!browserVisionSupported()) throw new Error('This browser cannot run visual analysis.')
   const { face, pose } = await loadModels()
   const { video, url } = await loadVideo(videoBlob)
-  let lastStamp = timestampCursor
 
   try {
-    const duration = Number.isFinite(video.duration) && video.duration > 0
-      ? video.duration
-      : Number(durationSeconds) || 0
+    // The recorder timed the take with a wall clock. A MediaRecorder WebM often
+    // carries no duration header at all, and what the element reports for one
+    // ranges from correct to Infinity depending on the browser - so the
+    // measured value wins where there is one.
+    const reported = Number(durationSeconds) || 0
+    const container = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0
+    const duration = reported > 0 ? reported : container
     if (!(duration > 0)) throw new Error('This recording has no readable duration.')
 
     const width = video.videoWidth || 640
     const height = video.videoHeight || 480
     const step = 1 / SAMPLE_FPS
-    const total = Math.max(1, Math.floor(duration * SAMPLE_FPS))
+    // Bounded on purpose. A wrong duration must cost a short analysis, not tens
+    // of thousands of inference calls - and the backend refuses more than 5,000
+    // frames anyway.
+    const total = Math.min(MAX_FRAMES, Math.max(1, Math.floor(duration * SAMPLE_FPS)))
     const frames = []
 
     for (let i = 0; i < total; i += 1) {
       if (signal?.aborted) throw new Error('Visual analysis was cancelled.')
       const at = Math.min(i * step, Math.max(0, duration - 0.001))
       await seekTo(video, at)
-      const stamp = timestampCursor + Math.round(at * 1000) + i
-      lastStamp = Math.max(lastStamp, stamp)
+      const stamp = nextTimestamp()
 
       const record = { face_count: 0, head_pose: null, gaze: null, pose: null, pose_attempted: true }
 
@@ -238,9 +292,6 @@ export async function buildVisionTimeline(videoBlob, { durationSeconds = 0, onPr
 
     return { frames, durationSeconds: duration, sampleFps: SAMPLE_FPS }
   } finally {
-    // Advance past whatever this run used, including on an error or a cancel,
-    // so the next analysis cannot hand the landmarker an older timestamp.
-    timestampCursor = lastStamp + 1000
     URL.revokeObjectURL(url)
     video.removeAttribute('src')
     video.load()
