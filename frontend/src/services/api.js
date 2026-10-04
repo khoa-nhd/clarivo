@@ -175,6 +175,28 @@ export async function analyzeVisionDelivery({ videoBlob, durationSeconds = 0 }) 
   return payload
 }
 
+/** Score visual delivery from a timeline the browser's own models produced.
+ *
+ * The recording stays in the browser; only what the models saw is sent. That is
+ * what makes visual analysis work on the deployed backend at all - the OpenVINO
+ * stack is far over the serverless size limit, and a video is far over the
+ * request body limit. A minute of timeline is about 47 kB.
+ */
+export async function analyzeVisionTimeline({ frames, durationSeconds = 0, sampleFps = 2 }) {
+  const response = await fetch(apiUrl('/api/analyze/vision-timeline'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      frames,
+      duration_seconds: durationSeconds || 0,
+      sample_fps: sampleFps || 2,
+    }),
+  })
+  const payload = await readPayload(response)
+  if (!response.ok) throw new Error(errorMessage(response, payload))
+  return payload
+}
+
 export async function generateDrillChallenges(session, result) {
   const response = await fetch(apiUrl('/api/drills/generate'), {
     method: 'POST',

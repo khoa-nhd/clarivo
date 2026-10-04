@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { analyzeAudioDelivery, analyzeSession, analyzeVisionDelivery, checkHealth, evaluateDrillRound, finalizeDrillSession, generateDrillChallenges } from '../services/api.js'
+import { analyzeAudioDelivery, analyzeSession, analyzeVisionDelivery, analyzeVisionTimeline, checkHealth, evaluateDrillRound, finalizeDrillSession, generateDrillChallenges } from '../services/api.js'
+import { browserVisionSupported, buildVisionTimeline } from '../services/visionTimeline.js'
 import { deleteSessionAudio, getSessionAudio, saveSessionAudio } from '../services/audioStore.js'
 import { deleteSessionVideo, getSessionVideo, saveSessionVideo } from '../services/videoStore.js'
 
@@ -86,7 +87,19 @@ function audioAvailable(health) {
 
 function visionAvailable(health) {
   const delivery = health?.delivery_analysis
-  return Boolean(delivery?.enabled && (delivery?.vision_ready ?? delivery?.models_ready))
+  if (delivery?.enabled && (delivery?.vision_ready ?? delivery?.models_ready)) return true
+  // The deployed backend cannot carry the models - they are far over the
+  // serverless size limit, and a recording is far over the request body limit -
+  // so there the models run in the browser and the backend scores what they
+  // saw. Both paths end in the same scorer.
+  return Boolean(delivery?.vision_timeline_ready && browserVisionSupported())
+}
+
+/** True when visual analysis has to run the models here rather than on the server. */
+function visionRunsInBrowser(health) {
+  const delivery = health?.delivery_analysis
+  const serverSide = delivery?.enabled && (delivery?.vision_ready ?? delivery?.models_ready)
+  return !serverSide && Boolean(delivery?.vision_timeline_ready && browserVisionSupported())
 }
 
 export function useSessionQueue() {
@@ -227,11 +240,17 @@ export function useSessionQueue() {
             durationSeconds: next.audio?.durationSeconds || 0,
           })
         : Promise.resolve(null)
+      const visionDuration = next.video?.durationSeconds || next.audio?.durationSeconds || 0
       const visionPromise = videoMedia?.blob
-        ? analyzeVisionDelivery({
-            videoBlob: videoMedia.blob,
-            durationSeconds: next.video?.durationSeconds || next.audio?.durationSeconds || 0,
-          })
+        ? (visionRunsInBrowser(health)
+            ? buildVisionTimeline(videoMedia.blob, { durationSeconds: visionDuration })
+                .then(({ frames, durationSeconds, sampleFps }) => analyzeVisionTimeline({
+                  frames, durationSeconds, sampleFps,
+                }))
+            : analyzeVisionDelivery({
+                videoBlob: videoMedia.blob,
+                durationSeconds: visionDuration,
+              }))
         : Promise.resolve(null)
 
       const [contentResult, audioResult, visionResult] = await Promise.allSettled([

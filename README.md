@@ -38,10 +38,19 @@ Local OpenVINO voice/visual analysis is a separate, much larger install
 `backend\setup_local_scoring.bat`, then set `LOCAL_SCORING_ENABLED=true` in
 `backend\.env`.
 
-Deployed on Vercel, the backend serves transcription, content analysis, voice
-analysis and the Q&A drills. Visual analysis is local-only: OpenVINO and the
-model weights do not fit a serverless function, so `/api/health` reports it
-unavailable there and the UI hides it. Run the project locally for the full set.
+Deployed on Vercel the site runs every feature, including visual analysis.
+
+Visual analysis has two paths and the backend reports which one it can serve:
+
+- **Locally** the OpenVINO stack runs on this machine over the uploaded video.
+- **Deployed** the models run in the viewer's browser (MediaPipe) and only the
+  per-frame signals are posted to `/api/analyze/vision-timeline`, where the same
+  scoring code grades them. The recording never leaves the browser.
+
+The second path exists because the first cannot be deployed: the stack measures
+about 970 MB of wheels against Vercel's 500 MB limit, and a camera recording is
+far over the 4.5 MB request body limit regardless. A minute of timeline is about
+47 kB.
 
 A recording is capped at the length whose 16 kHz WAV fits the 4.5 MB serverless
 request limit - about 2m24s deployed, the full 5 minutes locally.
