@@ -18,7 +18,14 @@ function moduleLabel(name, state, fallbackReady = false) {
   return name
 }
 
-export default function SessionView({ session, onNew, onRetry, onDelete, onUpdateTranscript, onAnswerDrill, onRegenerateDrills, onFinalizeDrills }) {
+//: Delivery states that leave something worth re-running - but only for a
+//: capability the session actually recorded. An audio-only session reports
+//: vision "unavailable" forever and quite correctly, and treating that as
+//: unfinished work left the offer on screen with nothing to do.
+const DELIVERY_INCOMPLETE = ['unavailable', 'error']
+const DELIVERY_RUNNING = ['processing', 'queued']
+
+export default function SessionView({ session, onNew, onRetry, onRetryDelivery, onDelete, onUpdateTranscript, onAnswerDrill, onRegenerateDrills, onFinalizeDrills }) {
   const states = session.analysisState || {}
   const contentDone = Boolean(session.result) || states.content === 'complete'
   const voiceDone = Boolean(session.delivery?.voice) || states.audio === 'complete'
@@ -92,6 +99,35 @@ export default function SessionView({ session, onNew, onRetry, onDelete, onUpdat
             <h2>Analysis failed</h2>
             <p>{session.error}</p>
             <button className="primary-button compact-button" onClick={() => onRetry(session.id)}>Retry analysis</button>
+          </div>
+        </section>
+      )}
+
+      {/* A session whose content report succeeded completes even when voice or
+          visual did not, so the "Analysis failed" retry above never appears for
+          it. Without this there is nothing to click: the recording is still in
+          the browser, the backend may since have recovered, and re-running the
+          whole session would spend another content analysis and throw away the
+          Q&A progress. */}
+      {session.status === 'complete'
+        && ((session.audio && DELIVERY_INCOMPLETE.includes(session.analysisState?.audio))
+          || (session.video && DELIVERY_INCOMPLETE.includes(session.analysisState?.vision)))
+        && (
+        <section className="state-card delivery-retry-state">
+          <div>
+            <div className="eyebrow">Delivery analysis incomplete</div>
+            <p>
+              {session.deliveryError
+                || 'Voice or visual analysis did not run for this session. The recording is still here, so it can be scored without redoing the content report.'}
+            </p>
+            <button
+              className="primary-button compact-button"
+              onClick={() => onRetryDelivery(session.id)}
+              disabled={DELIVERY_RUNNING.includes(session.analysisState?.audio)
+                || DELIVERY_RUNNING.includes(session.analysisState?.vision)}
+            >
+              Re-run voice &amp; visual
+            </button>
           </div>
         </section>
       )}

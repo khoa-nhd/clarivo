@@ -27,6 +27,7 @@ export default function App() {
             session={queue.activeSession}
             onNew={queue.startNewSession}
             onRetry={queue.retrySession}
+            onRetryDelivery={queue.retryDelivery}
             onDelete={queue.removeSession}
             onUpdateTranscript={queue.updateTranscript}
             onAnswerDrill={queue.submitDrillAnswer}

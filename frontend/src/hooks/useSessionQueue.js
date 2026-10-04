@@ -193,6 +193,84 @@ export function useSessionQueue() {
   const localDeliveryEnabled = localAudioEnabled || localVisionEnabled
   const backendUnreachable = Boolean(backendHealth?.delivery_analysis?.unreachable)
 
+  /** Run voice and visual analysis for one session against a known health reading.
+   *
+   * Shared by the queue worker and by a delivery-only re-run, so a retry cannot
+   * drift from the original path.
+   */
+  const runDelivery = useCallback(async (session, health) => {
+    const audioEnabled = audioAvailable(health)
+    const visionEnabled = visionAvailable(health)
+
+    const audioMedia = session.audio && audioEnabled
+      ? await getSessionAudio(session.id).catch(() => null)
+      : null
+    const videoMedia = session.video && visionEnabled
+      ? await getSessionVideo(session.id).catch(() => null)
+      : null
+
+    const visionDuration = session.video?.durationSeconds || session.audio?.durationSeconds || 0
+    const [audioResult, visionResult] = await Promise.allSettled([
+      audioMedia?.blob
+        ? analyzeAudioDelivery({
+            audioWavBlob: audioMedia.blob,
+            transcript: session.audio?.rawTranscript || session.transcript,
+            durationSeconds: session.audio?.durationSeconds || 0,
+          })
+        : Promise.resolve(null),
+      videoMedia?.blob
+        ? (visionRunsInBrowser(health)
+            ? buildVisionTimeline(videoMedia.blob, { durationSeconds: visionDuration })
+                .then(({ frames, durationSeconds, sampleFps }) => analyzeVisionTimeline({
+                  frames, durationSeconds, sampleFps,
+                }))
+            : analyzeVisionDelivery({ videoBlob: videoMedia.blob, durationSeconds: visionDuration }))
+        : Promise.resolve(null),
+    ])
+
+    const audioValue = audioResult.status === 'fulfilled' ? audioResult.value : null
+    const visionValue = visionResult.status === 'fulfilled' ? visionResult.value : null
+    return {
+      delivery: combineDelivery(audioValue, visionValue),
+      deliveryError: [
+        audioResult.status === 'rejected' ? `Voice: ${audioResult.reason?.message || 'analysis failed'}` : null,
+        visionResult.status === 'rejected' ? `Visual: ${visionResult.reason?.message || 'analysis failed'}` : null,
+      ].filter(Boolean).join(' · ') || null,
+      audioState: audioResult.status === 'rejected' ? 'error' : audioValue ? 'complete' : 'unavailable',
+      visionState: visionResult.status === 'rejected' ? 'error' : visionValue ? 'complete' : 'unavailable',
+    }
+  }, [])
+
+  /** Re-run only voice and visual on a session that already has its content report.
+   *
+   * Without this, a session whose delivery failed stayed that way for good: the
+   * "Retry analysis" button only appears when the whole session errored, and a
+   * session whose content succeeded completes regardless of whether voice and
+   * visual did. Anyone who recorded while the backend was briefly unhealthy was
+   * left looking at "Voice unavailable" with nothing to click - and re-running
+   * everything would spend a content analysis and discard the Q&A progress for
+   * no reason.
+   */
+  const retryDelivery = useCallback(async (id) => {
+    const session = sessionsRef.current.find((item) => item.id === id)
+    if (!session || !(session.audio || session.video)) return
+    const health = await refreshHealth()
+    patchSession(id, {
+      deliveryError: null,
+      analysisState: {
+        ...(session.analysisState || {}),
+        audio: session.audio && audioAvailable(health) ? 'processing' : 'unavailable',
+        vision: session.video && visionAvailable(health) ? 'processing' : 'unavailable',
+      },
+    })
+    const { delivery, deliveryError, audioState, visionState } = await runDelivery(session, health)
+    patchSession(id, {
+      delivery,
+      deliveryError,
+      analysisState: { ...(session.analysisState || {}), audio: audioState, vision: visionState },
+    })
+  }, [patchSession, refreshHealth, runDelivery])
+
   useEffect(() => {
     if (inFlightIdRef.current) return
     const next = sessions.find((session) => session.status === 'queued')
@@ -227,45 +305,22 @@ export function useSessionQueue() {
         },
       })
 
-      let audioMedia = null
-      let videoMedia = null
-      if (next.audio && audioEnabled) audioMedia = await getSessionAudio(next.id).catch(() => null)
-      if (next.video && visionEnabled) videoMedia = await getSessionVideo(next.id).catch(() => null)
-
       const contentPromise = analyzeSession(next)
-      const audioPromise = audioMedia?.blob
-        ? analyzeAudioDelivery({
-            audioWavBlob: audioMedia.blob,
-            transcript: next.audio?.rawTranscript || next.transcript,
-            durationSeconds: next.audio?.durationSeconds || 0,
-          })
-        : Promise.resolve(null)
-      const visionDuration = next.video?.durationSeconds || next.audio?.durationSeconds || 0
-      const visionPromise = videoMedia?.blob
-        ? (visionRunsInBrowser(health)
-            ? buildVisionTimeline(videoMedia.blob, { durationSeconds: visionDuration })
-                .then(({ frames, durationSeconds, sampleFps }) => analyzeVisionTimeline({
-                  frames, durationSeconds, sampleFps,
-                }))
-            : analyzeVisionDelivery({
-                videoBlob: videoMedia.blob,
-                durationSeconds: visionDuration,
-              }))
-        : Promise.resolve(null)
-
-      const [contentResult, audioResult, visionResult] = await Promise.allSettled([
+      const deliveryPromise = runDelivery(next, health)
+      const [contentResult, deliveryOutcome] = await Promise.allSettled([
         contentPromise,
-        audioPromise,
-        visionPromise,
+        deliveryPromise,
       ])
 
-      const audioValue = audioResult.status === 'fulfilled' ? audioResult.value : null
-      const visionValue = visionResult.status === 'fulfilled' ? visionResult.value : null
-      const delivery = combineDelivery(audioValue, visionValue)
-      const deliveryErrors = [
-        audioResult.status === 'rejected' ? `Voice: ${audioResult.reason?.message || 'analysis failed'}` : null,
-        visionResult.status === 'rejected' ? `Visual: ${visionResult.reason?.message || 'analysis failed'}` : null,
-      ].filter(Boolean)
+      const { delivery, deliveryError, audioState, visionState } =
+        deliveryOutcome.status === 'fulfilled'
+          ? deliveryOutcome.value
+          : {
+              delivery: null,
+              deliveryError: deliveryOutcome.reason?.message || 'Delivery analysis failed',
+              audioState: 'error',
+              visionState: 'error',
+            }
 
       let initialDrill = null
       let initialDrillError = null
@@ -290,12 +345,8 @@ export function useSessionQueue() {
           status: 'error',
           error: contentResult.reason?.message || 'Unknown content analysis error',
           delivery,
-          deliveryError: deliveryErrors.join(' · ') || null,
-          analysisState: {
-            content: 'error',
-            audio: audioResult.status === 'rejected' ? 'error' : audioValue ? 'complete' : 'unavailable',
-            vision: visionResult.status === 'rejected' ? 'error' : visionValue ? 'complete' : 'unavailable',
-          },
+          deliveryError,
+          analysisState: { content: 'error', audio: audioState, vision: visionState },
           completedAt: new Date().toISOString(),
         })
         return
@@ -305,7 +356,7 @@ export function useSessionQueue() {
         status: 'complete',
         result: contentResult.value,
         delivery,
-        deliveryError: deliveryErrors.join(' · ') || null,
+        deliveryError,
         drill: initialDrill
           ? {
               state: initialDrill.drill_recommended === false ? 'skipped' : 'ready',
@@ -333,11 +384,7 @@ export function useSessionQueue() {
               stopReason: '',
               error: initialDrillError || 'Could not generate follow-up challenges.',
             },
-        analysisState: {
-          content: 'complete',
-          audio: audioResult.status === 'rejected' ? 'error' : audioValue ? 'complete' : 'unavailable',
-          vision: visionResult.status === 'rejected' ? 'error' : visionValue ? 'complete' : 'unavailable',
-        },
+        analysisState: { content: 'complete', audio: audioState, vision: visionState },
         completedAt: new Date().toISOString(),
         error: null,
       })
@@ -346,7 +393,7 @@ export function useSessionQueue() {
         inFlightIdRef.current = null
         setSessions((current) => [...current])
       })
-  }, [sessions, patchSession, refreshHealth, localAudioEnabled, localVisionEnabled])
+  }, [sessions, patchSession, refreshHealth, runDelivery, localAudioEnabled, localVisionEnabled])
 
   const addSession = useCallback((draft) => {
     const session = {
@@ -571,6 +618,7 @@ export function useSessionQueue() {
     addSession,
     setActiveId,
     retrySession,
+    retryDelivery,
     removeSession,
     updateTranscript,
     regenerateDrills,
