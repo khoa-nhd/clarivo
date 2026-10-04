@@ -226,3 +226,24 @@ class FinalizeDrillResult(BaseModel):
     coverage_status: Literal["developing", "satisfactory"]
     core_concepts_coverage: int = Field(ge=0, le=100)
     final_summary: FinalLearningSummary
+
+
+class VisionFrame(BaseModel):
+    """One sampled frame, as the browser's models saw it.
+
+    Angles are degrees, camera-relative. The scorer calibrates away systematic
+    bias, so a model whose zero differs from OpenVINO's is still scored
+    correctly - but the units must match.
+    """
+
+    face_count: int = Field(default=0, ge=0, le=32)
+    head_pose: list[float] | None = Field(default=None, min_length=3, max_length=3)
+    gaze: list[float] | None = Field(default=None, min_length=3, max_length=3)
+    pose: dict[str, list[list[float]] | list[float]] | None = None
+    pose_attempted: bool = False
+
+
+class VisionTimelineRequest(BaseModel):
+    frames: list[VisionFrame]
+    duration_seconds: float = Field(default=0.0, ge=0.0)
+    sample_fps: float = Field(default=2.0, ge=0.1, le=60.0)

@@ -104,6 +104,11 @@ def _missing_modules() -> dict[str, tuple[str, ...]]:
     return {
         "audio": absent(_AUDIO_REQUIREMENTS),
         "vision": absent(_VISION_REQUIREMENTS),
+        # Scoring a timeline the browser produced needs the decision layer only,
+        # which is pure NumPy. No OpenVINO, no OpenCV, no model weights - that is
+        # the whole point of the split, and it is what makes visual analysis
+        # possible on a serverless deployment.
+        "vision_timeline": absent(("numpy",)),
     }
 
 
@@ -113,12 +118,20 @@ def capability_payload() -> dict[str, Any]:
 
     audio_ready = enabled_by_config and not missing["audio"]
     vision_ready = enabled_by_config and not missing["vision"] and models_ready()
-    enabled = audio_ready or vision_ready
+    # Browser-side inference does not depend on LOCAL_SCORING_ENABLED: that flag
+    # means "this machine may run the OpenVINO stack", and here the models run on
+    # the viewer's device. The backend only scores the timeline they produce.
+    vision_timeline_ready = not missing["vision_timeline"]
+    enabled = audio_ready or vision_ready or vision_timeline_ready
 
-    if not enabled_by_config:
-        mode = "disabled"
-    elif enabled:
+    if vision_ready or audio_ready:
         mode = "local_openvino"
+    elif vision_timeline_ready and not enabled_by_config:
+        # Nothing local runs here, but visual analysis still works because the
+        # models run in the browser and only the scoring happens server side.
+        mode = "browser_inference"
+    elif not enabled_by_config:
+        mode = "disabled"
     else:
         # Configured on, but this deployment cannot actually run it.
         mode = "unavailable"
@@ -128,6 +141,9 @@ def capability_payload() -> dict[str, Any]:
         "audio_ready": audio_ready,
         "vision_ready": vision_ready,
         "models_ready": vision_ready,  # backward compatibility with the previous UI
+        # Visual analysis with the models running in the viewer's browser. True
+        # on the serverless deployment, where vision_ready is necessarily false.
+        "vision_timeline_ready": vision_timeline_ready,
         "mode": mode,
         # Published so the browser enforces the same ceilings the server does.
         # They were duplicated as constants in the upload panel and had already
@@ -425,6 +441,62 @@ def analyze_vision_path(*, video_path: Path) -> dict[str, Any]:
         pose_device=pose_device,
         cache_dir=cache_dir,
         cfg=VisionConfig(sample_fps=float(os.getenv("LOCAL_SAMPLE_FPS", "2.0"))),
+    )
+    return _compact_vision(vision, time.perf_counter() - started)
+
+
+#: A five-minute talk sampled at 2 fps is 600 frames. The ceiling is generous
+#: against that and still bounds how much work one request can ask for.
+MAX_TIMELINE_FRAMES = 5_000
+
+
+def analyze_vision_timeline(
+    *,
+    frames: list[dict[str, Any]],
+    duration_seconds: float,
+    sample_fps: float = 0.0,
+) -> dict[str, Any]:
+    """Score a timeline the browser produced by running models on the viewer's device.
+
+    This is the path that makes visual analysis work on a deployment that cannot
+    carry the models. The browser sends what it saw per frame - face count, head
+    pose, gaze, pose keypoints - which is a few hundred kilobytes of JSON rather
+    than a video that could not fit through the request limit anyway.
+
+    The scoring is the same code the local OpenVINO path uses. Only the source
+    of the angles differs, so the decision layer, its thresholds and its tests
+    are shared rather than reimplemented.
+    """
+    from local_scoring.config import VisionConfig
+    from local_scoring.vision_analyzer import score_timeline
+
+    if not isinstance(frames, list) or not frames:
+        raise ValueError("The vision timeline was empty.")
+    if len(frames) > MAX_TIMELINE_FRAMES:
+        raise ValueError(
+            f"The vision timeline has {len(frames)} frames, over the "
+            f"{MAX_TIMELINE_FRAMES} this backend accepts."
+        )
+
+    duration = float(duration_seconds or 0.0)
+    if duration <= 0.0:
+        # Without a duration every "sustained for N seconds" rule would be
+        # scaled by an unknown factor. Fall back to the sampling rate the
+        # browser reports, and say which evidence was used.
+        duration = len(frames) / max(float(sample_fps or 2.0), 0.1)
+        duration_source = "sample_count_estimate"
+    else:
+        duration_source = "browser_recording_duration"
+
+    started = time.perf_counter()
+    vision = score_timeline(
+        frames,
+        duration_seconds=duration,
+        duration_source=duration_source,
+        cfg=VisionConfig(sample_fps=float(sample_fps or 2.0)),
+        source_fps=float(sample_fps or 0.0),
+        advanced_frames=len(frames),
+        benchmark={"inference_location": "browser", "scored_frames": len(frames)},
     )
     return _compact_vision(vision, time.perf_counter() - started)
 

@@ -27,9 +27,11 @@ from app.schemas import (
     TopicRefreshRequest,
     TopicRefreshResult,
     TranscriptionResult,
+    VisionTimelineRequest,
 )
 from app.local_delivery import (
     analyze_audio_path,
+    analyze_vision_timeline,
     analyze_delivery_files,
     analyze_vision_path,
     capability_payload,
@@ -481,6 +483,43 @@ async def analyze_visual_delivery(
                 status_code=500,
                 detail=f"Local visual analysis failed: {type(exc).__name__}: {message}",
             ) from exc
+
+
+@app.post("/api/analyze/vision-timeline")
+async def analyze_visual_timeline(payload: VisionTimelineRequest):
+    """Score visual delivery from models the browser ran on the viewer's device.
+
+    The video never leaves the browser. That is not a privacy flourish - it is
+    the only arrangement that works here: the OpenVINO stack is ~970 MB against
+    a 500 MB serverless limit, and a recording could not fit through the 4.5 MB
+    request body cap even if the stack did fit. A timeline is a few hundred
+    kilobytes, and the scoring it feeds is the same code the local path uses.
+    """
+    capability = capability_payload()
+    if not capability.get("vision_timeline_ready"):
+        raise HTTPException(
+            status_code=503,
+            detail="This backend cannot score a vision timeline (NumPy is missing).",
+        )
+
+    frames = [frame.model_dump() for frame in payload.frames]
+    try:
+        return await run_in_threadpool(
+            analyze_vision_timeline,
+            frames=frames,
+            duration_seconds=payload.duration_seconds,
+            sample_fps=payload.sample_fps,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Vision timeline scoring failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Visual analysis failed: {type(exc).__name__}: {exc}",
+        ) from exc
 
 
 @app.post("/api/analyze/delivery")
