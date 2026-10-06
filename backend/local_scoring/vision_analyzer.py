@@ -1134,7 +1134,7 @@ def score_timeline(
     posture_measurements: list[tuple[dict[str,Any],float,bool]]=[]
     posture_timeline: list[dict[str,Any] | None] = []
     pose_quality_values=[]
-    pose_valid=pose_attempts=0
+    pose_valid=pose_attempts=pose_detected_frames=0
     gesture_tracker=GestureTracker(cfg)
     kp_visible={name:0 for name in ("left_shoulder","right_shoulder","left_hip","right_hip","left_elbow","right_elbow","left_wrist","right_wrist")}
     if not frames:
@@ -1206,6 +1206,7 @@ def score_timeline(
             pose_attempts += 1
             p=_record.get("pose")
             if p is not None:
+                pose_detected_frames += 1
                 if not faces:
                     # Face detector can miss a frame while the person/body tracker
                     # still clearly sees the presenter. Do not call that "out of frame".
@@ -1393,11 +1394,18 @@ def score_timeline(
             if d <= 30.0:
                 motion.append(d)
         prev=item
+    # Head stability is a statement about how much the head moved, so it needs
+    # enough head observations to be a statement at all. With none, the motion
+    # list is empty, the median is 0, and the curve below reads that as perfect
+    # stillness: a recording of an empty room scored 94 for head stability and
+    # carried that into the overall. Absence of evidence was being scored as
+    # evidence of excellence.
+    head_stability_reliable = len(motion) >= max(3, int(round(2.0 * effective_sample_fps)))
     head_motion_p75=float(np.percentile(motion,75)) if motion else 0.0
     head_motion_median=float(np.median(motion)) if motion else 0.0
     med_score=piecewise_linear(head_motion_median,[(0,94),(2,91),(4,86),(7,78),(11,67),(16,52),(24,32),(35,10)])
     p75_score=piecewise_linear(head_motion_p75,[(0,94),(3,90),(6,83),(10,73),(15,60),(22,43),(30,25)])
-    head_stability=clamp(.55*med_score+.45*p75_score)
+    head_stability=clamp(.55*med_score+.45*p75_score) if head_stability_reliable else None
 
     # Presence measures whether the presenter is actually in frame. 95+ requires
     # near-continuous visibility; a few percent missing is noticeable.
@@ -1501,9 +1509,23 @@ def score_timeline(
     if not posture_is_reliable and upper_body_count >= 3 and mean_pose_quality >= (cfg.posture_reliable_quality * 0.82):
         posture_is_reliable = True
 
+    # Was there a presenter in this recording at all?
+    #
+    # Mirrors how the voice side refuses to score silence. A clip of an empty
+    # room still produced a number - presence 0, attention 14.6 - which reads as
+    # "your delivery was poor" when the truth is "nobody was visible". The two
+    # deserve different answers, and a grade nobody earned is the worse one.
+    frames_with_face = sum(1 for count in face_counts if count > 0)
+    presenter_observed = (frames_with_face + pose_detected_frames) > 0
+
     # v8 overall avoids counting presence/engagement twice: camera_attention already
     # contains both. Gesture remains informational and never changes the grade.
-    components=[(camera_attention,cfg.attention_weight),(head_stability,cfg.head_stability_weight)]
+    # Only measured things are averaged. Posture was already gated this way;
+    # head stability now is too, so a component with no observations behind it
+    # cannot lift or lower the grade.
+    components=[(camera_attention,cfg.attention_weight)]
+    if head_stability_reliable:
+        components.append((head_stability,cfg.head_stability_weight))
     if posture_is_reliable:
         components.append((posture,cfg.posture_weight))
     total_w=sum(w for _,w in components)
@@ -1529,7 +1551,8 @@ def score_timeline(
         "presence":round(presence_score,1),
         "engagement":round(engagement_score,1),
         "camera_attention":round(camera_attention,1),
-        "head_stability":round(head_stability,1),
+        # None rather than a default when the head was never observed.
+        "head_stability":round(head_stability,1) if head_stability_reliable else None,
         # Do not manufacture a posture/gesture number when the camera cannot
         # measure it reliably. This is more honest than a misleading default score.
         "posture":round(posture,1) if posture_is_reliable else None,
@@ -1537,7 +1560,7 @@ def score_timeline(
         # rather than pretending there is one universally correct numeric grade.
         "gesture":None,
         "score_confidence":round(vision_confidence,1),
-        "overall":round(overall,1),
+        "overall":round(overall,1) if presenter_observed else None,
     }
 
     def avg_detail(key: str) -> float:
@@ -1657,7 +1680,7 @@ def score_timeline(
         feedback.append("Head orientation was mixed: several off-axis periods reduced camera attention.")
     elif engagement_score >= 86:
         feedback.append("Head orientation stayed well centered overall; brief natural glances were not heavily penalized.")
-    if head_stability<60:
+    if head_stability_reliable and head_stability<60:
         feedback.append("Large head-direction changes were frequent; make transitions a little more controlled.")
     elif head_turn_violation["repeat_triggered"]:
         feedback.append("Several prolonged head turns were detected; use shorter, more deliberate slide-facing turns.")
@@ -1682,7 +1705,10 @@ def score_timeline(
         feedback.append("Frequent hand/arm movement was detected; review whether it supports your key points rather than distracts.")
 
     return {
-        "vision_score":round(overall,1),
+        "vision_score":round(overall,1) if presenter_observed else None,
+        # Says which of "they presented badly" and "we could not see them"
+        # this report is, which a bare low score cannot.
+        "visual_state":"PRESENTER_DETECTED" if presenter_observed else "NO_PRESENTER_DETECTED",
         "metrics":metrics,
         "scores":scores,
         "feedback":feedback[:6],

@@ -80,6 +80,14 @@ async function loadModels() {
           baseOptions: { modelAssetPath: FACE_MODEL, delegate: 'GPU' },
           runningMode: 'VIDEO',
           numFaces: 1,
+          // The defaults are 0.5 and far too strict for a presenter who turns
+          // to a slide: measured against OpenVINO on the same clip, the face was
+          // found in 1 frame of 24 where OpenVINO found it in 23 of 23. A missed
+          // face is not a neutral outcome - it removes the frame from the
+          // attention evidence entirely.
+          minFaceDetectionConfidence: 0.2,
+          minFacePresenceConfidence: 0.2,
+          minTrackingConfidence: 0.2,
           // The transformation matrix is the head pose; the blendshapes carry
           // where the eyes are pointing inside that head.
           outputFacialTransformationMatrixes: true,
@@ -109,28 +117,48 @@ const DEG = 180 / Math.PI
 
 /** Head pose in degrees from MediaPipe's 4x4 facial transformation matrix.
  *
- * The matrix is column-major. Only the rotation block matters here, decomposed
- * as yaw-pitch-roll. The absolute zero does not have to match OpenVINO's: the
- * scorer calibrates a per-session baseline and works in angles relative to it,
- * so a constant offset cancels. The *scale* does matter, which is why this
- * returns degrees rather than the raw matrix.
+ * The matrix is column-major, so the element at row i and column j is m[j*4+i].
+ * Only the rotation block matters, decomposed about the axes head pose is
+ * actually described in: yaw about the vertical axis (turning to a slide),
+ * pitch about the horizontal axis (nodding), roll about the viewing axis
+ * (tilting).
+ *
+ * The previous version used the ZYX convention, which labels a different axis
+ * "yaw". Verified against rotations with known angles, it reported a 30 degree
+ * head turn as 30 degrees of *pitch*, a 20 degree nod as 20 degrees of *roll*,
+ * and a 15 degree tilt as -15 degrees of *yaw* - every axis shifted by one. The
+ * scorer treats the three very differently, so every head turn in every
+ * browser-analysed recording was graded against the thresholds for nodding.
+ *
+ * It had a passing test, which tested nothing: the test built its input
+ * matrices with the same mistaken convention the decomposition used, so the two
+ * errors cancelled. The test below is built from real axis rotations instead.
+ *
+ * The absolute zero does not have to match OpenVINO's - the scorer calibrates a
+ * per-session baseline and works in angles relative to it - but the axes and
+ * the scale do.
  */
 function headPoseFromMatrix(matrix) {
   if (!matrix || matrix.length < 16) return null
-  const m = matrix
-  // Column-major: m[col * 4 + row].
-  const r00 = m[0], r10 = m[1], r20 = m[2]
-  const r21 = m[6], r22 = m[10]
-  const sy = Math.hypot(r00, r10)
-  if (!Number.isFinite(sy) || sy < 1e-6) return null
-  const pitch = Math.atan2(-r20, sy) * DEG
-  const yaw = Math.atan2(r10, r00) * DEG
-  const roll = Math.atan2(r21, r22) * DEG
-  if (![pitch, yaw, roll].every(Number.isFinite)) return null
-  // MediaPipe's yaw grows to the subject's right where OpenVINO's grows to the
-  // left. Every rule downstream is symmetric around the calibrated baseline, so
-  // this only keeps the two sources describing the same turn the same way.
-  return [-yaw, pitch, roll]
+  const at = (row, col) => matrix[col * 4 + row]
+
+  const r02 = at(0, 2), r12 = at(1, 2), r22 = at(2, 2)
+  const r10 = at(1, 0), r11 = at(1, 1)
+
+  const cosPitch = Math.hypot(r02, r22)
+  if (!Number.isFinite(cosPitch) || cosPitch < 1e-6) return null
+
+  const yaw = Math.atan2(r02, r22) * DEG
+  const pitch = Math.atan2(-r12, cosPitch) * DEG
+  // Roll is negated to match the handedness the scorer was built against. On
+  // the one frame where both models saw the same face, OpenVINO read +15.5 and
+  // this matrix -18.4; the eye-line angle from the pose landmarks, which is
+  // unambiguous geometry, agreed with OpenVINO's sign. Two independent sources
+  // against one. It matters because roll is what the posture stage uses to
+  // cancel camera tilt, and backwards it would add the tilt instead.
+  const roll = -Math.atan2(r10, r11) * DEG
+  if (![yaw, pitch, roll].every(Number.isFinite)) return null
+  return [yaw, pitch, roll]
 }
 
 function blendshape(categories, name) {

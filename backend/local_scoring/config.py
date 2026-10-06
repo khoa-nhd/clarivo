@@ -54,6 +54,25 @@ class AudioConfig:
     # speech occurred, which outranks an ambiguous energy histogram.
     min_words_as_speech_evidence: int = 8
 
+    #: Acoustic plausibility: does this waveform carry speech at all?
+    #:
+    #: A supplied transcript is evidence that somebody wrote words, not that
+    #: this recording contains them - and on the web path a transcript is
+    #: always supplied, which let a pure tone through as SPEECH_DETECTED.
+    #: These two tests cannot be overridden by a transcript.
+    #:
+    #: Set from measurements over the project's own synthetic speech suite
+    #: against steady sounds, with roughly half the headroom left as margin
+    #: because a false reject costs the user their whole voice report:
+    #:
+    #:     speech (22 cases)   modulation >= 0.100, separation >= 2.51 dB
+    #:     tones / hum / music modulation  = 0.000
+    #:     white noise         separation  = 0.43 dB, SNR 0.25 dB
+    min_syllable_modulation_index: float = 0.05
+    #: Separation or SNR - either is enough, so continuous speech in a quiet
+    #: room (which has little background to separate from) still passes.
+    min_speech_separation_db_for_plausibility: float = 1.0
+
     # Strict non-lexical fillers. Elongated forms such as "ummm" and "uhhh"
     # are normalized by the counter so the literal list does not need every form.
     filler_words: tuple[str, ...] = (

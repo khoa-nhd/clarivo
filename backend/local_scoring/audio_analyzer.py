@@ -380,6 +380,48 @@ def _detect_vowel_prolongation(
     }
 
 
+def _syllable_modulation_index(audio: np.ndarray, sr: int) -> float:
+    """How much of the loudness envelope moves at the syllable rate.
+
+    Speech gets louder and quieter two to eight times a second as syllables are
+    produced; a tone, a hum, a fan or a held note does not. This returns the
+    share of envelope energy falling in that band, which is the standard way to
+    tell speech from steady sound and costs one FFT of a 50 Hz envelope.
+
+    It exists because every other signal the analyzer had could be satisfied by
+    something that is not speech. A pure 140 Hz sine was being reported as
+    SPEECH_DETECTED at 58% confidence and scored 37.5, with two filler words
+    "detected" in it. Measured over this project's own synthetic speech suite
+    against steady sounds:
+
+        speech (22 cases)   minimum 0.100, median 0.201
+        pure tones          0.000
+        slow hum            0.000
+        music-like pulse    0.000
+        white noise         0.245   <- not separable this way; SNR catches it
+
+    So this measure vetoes held sounds, and the separation/SNR pair vetoes
+    steady noise. Neither is sufficient alone.
+    """
+    frame = max(1, int(round(0.02 * sr)))
+    usable = len(audio) // frame
+    if usable < 16:
+        return 0.0
+    envelope = np.abs(
+        np.asarray(audio[: usable * frame], dtype=np.float64).reshape(usable, frame)
+    ).mean(axis=1)
+    envelope = envelope - envelope.mean()
+    if not np.any(envelope):
+        return 0.0
+    spectrum = np.abs(np.fft.rfft(envelope * np.hanning(len(envelope))))
+    freqs = np.fft.rfftfreq(len(envelope), d=frame / float(sr))
+    total = float(spectrum.sum())
+    if total <= 0.0:
+        return 0.0
+    band = (freqs >= 2.0) & (freqs <= 8.0)
+    return float(spectrum[band].sum() / total)
+
+
 def _speech_activity(audio: np.ndarray, sr: int, cfg: AudioConfig) -> dict[str, Any]:
     """Detect speech/pauses with a gain-independent adaptive threshold.
 
@@ -503,6 +545,7 @@ def _speech_activity(audio: np.ndarray, sr: int, cfg: AudioConfig) -> dict[str, 
         "vad_mode": vad_mode,
         "vad_otsu_threshold_dbfs": vad_diagnostics["otsu_threshold_dbfs"],
         "vad_otsu_separation_db": vad_diagnostics["otsu_separation_db"],
+        "syllable_modulation_index": _syllable_modulation_index(audio, sr),
         "audio_dynamic_range_db": max(0.0, speech_ref - noise_floor),
         "average_volume_dbfs": avg_speech_db,
         "speech_snr_db": max(0.0, avg_speech_db - noise_floor),
@@ -567,6 +610,24 @@ def _classify_speech_state(
     if peak_dbfs < cfg.min_speech_peak_dbfs_for_scoring:
         # Numerically dead signal, not merely a quiet microphone.
         return "NO_SPEECH_DETECTED"
+
+    # Acoustic plausibility. Everything above can be satisfied by something that
+    # is not speech, and on the web path a transcript is always supplied - so
+    # `transcript_evidence` was waving tones, hums and music straight through.
+    # A transcript says somebody wrote words; it says nothing about whether this
+    # waveform contains them, so these two tests are deliberately not
+    # overridable by it.
+    modulation = float(raw.get("syllable_modulation_index", 0.0) or 0.0)
+    separation = float(raw.get("vad_otsu_separation_db", 0.0) or 0.0)
+    if modulation < cfg.min_syllable_modulation_index:
+        # A held sound: a tone, a hum, a fan, a sustained note. Speech moves at
+        # the syllable rate and this does not.
+        return "NO_SPEECH_DETECTED"
+    if (separation < cfg.min_speech_separation_db_for_plausibility
+            and snr < cfg.min_speech_separation_db_for_plausibility):
+        # Steady broadband sound with no speech standing out of it.
+        return "NO_SPEECH_DETECTED"
+
     if snr < cfg.min_speech_snr_db_for_scoring and not (unimodal and transcript_evidence):
         return "NO_SPEECH_DETECTED"
     if text_reliability < 0.50 and active_ratio < 0.35 and not transcript_evidence:

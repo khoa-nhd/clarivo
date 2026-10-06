@@ -334,6 +334,8 @@ def _compact_vision(vision: dict[str, Any], elapsed: float) -> dict[str, Any]:
     return {
         "schema_version": "clarivo-web-vision-phase20",
         "visual_score": vision.get("vision_score"),
+        # Distinguishes a poor delivery from a recording nobody appears in.
+        "visual_state": vision.get("visual_state", "PRESENTER_DETECTED"),
         "visual": {
             "attention_score": scores.get("camera_attention"),
             "presence_score": scores.get("presence"),
