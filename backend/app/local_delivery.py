@@ -271,6 +271,10 @@ def _compact_audio(audio: dict[str, Any], elapsed: float) -> dict[str, Any]:
             # case where an N/A verdict needs explaining rather than just showing.
             "vad_mode": metrics.get("vad_mode"),
             "vad_speech_background_separation_db": metrics.get("vad_otsu_separation_db"),
+            # Why a recording was refused as non-speech, rather than only that
+            # it was. Near zero means a held sound - a tone, a hum, a fan -
+            # where speech moves at the syllable rate.
+            "syllable_modulation_index": metrics.get("syllable_modulation_index"),
             "speech_threshold_dbfs": metrics.get("speech_threshold_dbfs"),
             "no_speech_detected": metrics.get("no_speech_detected"),
             "wpm": metrics.get("wpm"),
