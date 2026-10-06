@@ -69,7 +69,7 @@ def test_real_speech_cases_all_clear_the_threshold():
         for clip in all_clips()
         if "silence_only" not in clip.name
     )
-    assert worst >= CFG.min_syllable_modulation_index * 1.5, (
+    assert worst >= CFG.min_syllable_modulation_index * 4.0, (
         f"least-modulated speech case is {worst:.3f}, too close to the "
         f"{CFG.min_syllable_modulation_index} threshold"
     )
@@ -104,16 +104,25 @@ def test_held_sounds_are_refused_even_with_a_transcript(name, make):
 
 
 @pytest.mark.parametrize("level", [0.1, 0.01])
-def test_steady_noise_is_refused(level):
-    """Modulation does not catch noise - it scores 0.245, above most speech.
-    The separation and SNR pair is what rejects it, which is why both tests
-    exist rather than one."""
+def test_steady_noise_is_accepted_and_that_is_the_intended_trade(level):
+    """Noise is NOT refused, on purpose.
+
+    Modulation cannot tell it from speech - noise scores 0.245, above most real
+    speech - and the separation/SNR pair that did reject it also rejects
+    continuous speech with no pauses, which has no background to stand out
+    from. Spectral flatness was measured as an alternative and does not
+    separate them either: speech reaches 0.549 against white noise at 0.562.
+
+    So a recording of nothing but a fan is scored. That is the deliberate half
+    of the trade: refusing a talk somebody actually gave is the worse mistake,
+    and nobody submits a fan as their presentation.
+    """
     rng = np.random.default_rng(0)
-    assert _verdict(level * rng.standard_normal(SR * 20)) == "NO_SPEECH_DETECTED"
+    assert _verdict(level * rng.standard_normal(SR * 20)) == "SPEECH_DETECTED"
 
 
-def test_noise_would_pass_the_modulation_test_on_its_own():
-    """Pins why a single test is not enough, so neither gets dropped later."""
+def test_noise_is_indistinguishable_from_speech_by_modulation():
+    """Pins the measurement behind that trade, so it is not re-litigated blind."""
     rng = np.random.default_rng(0)
     noise = 0.1 * rng.standard_normal(SR * 20)
     assert _syllable_modulation_index(noise, SR) > CFG.min_syllable_modulation_index

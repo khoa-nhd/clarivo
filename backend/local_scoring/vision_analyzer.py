@@ -954,6 +954,13 @@ def _calibrated_gaze_states(
         by = bp = 0.0
 
     forward = looking = away = direct = slight = off_axis = held = 0
+    # Frames where the presenter is demonstrably in shot - the body model sees
+    # them - but no head orientation could be measured. Previously these were
+    # counted as "away", which answered the wrong question: being unable to tell
+    # where somebody is looking is not the same as them having left the room.
+    # A presenter the pose model saw at full confidence in every frame was
+    # scored presence 0 and away 100%.
+    unknown = 0
     states: list[str] = []
     soft_scores: list[float] = []
     deltas: list[tuple[float,float] | None] = []
@@ -975,6 +982,13 @@ def _calibrated_gaze_states(
             states.append("away")
             deltas.append(None)
             previous_band = None
+            continue
+        if hint == "present_unknown" or (item is None and hint == "present_unknown"):
+            unknown += 1
+            states.append("orientation_unknown")
+            deltas.append(None)
+            # Not a fresh observation of orientation, so the hysteresis band is
+            # neither kept nor reset on the strength of it.
             continue
         if item is None:
             away += 1
@@ -1032,6 +1046,7 @@ def _calibrated_gaze_states(
             off_axis += 1
         states.append(band)
     return {
+        "orientation_unknown": unknown,
         "baseline_yaw": by, "baseline_pitch": bp,
         "forward": forward, "looking": looking, "away": away, "direct": direct,
         "slight_off": slight, "off_axis": off_axis, "held": held,
@@ -1309,10 +1324,21 @@ def score_timeline(
 
     # Camera-attention v5: calibrate systematic camera/head-pose bias, then
     # recompute all states using the calibrated relative angles.
-    gaze_hints = [
-        state if state in {"held", "away"} else None
-        for state in orientation_states
-    ]
+    # A frame the body model saw is a frame the presenter was in, whether or not
+    # a head orientation came out of it. Telling the classifier which is which
+    # is what stops "we could not measure where they were looking" being scored
+    # as "they left the room".
+    gaze_hints = []
+    for index, state in enumerate(orientation_states):
+        if state in {"held", "away"}:
+            if state == "away" and index < len(pose_backed_flags) and pose_backed_flags[index]:
+                gaze_hints.append("present_unknown")
+            else:
+                gaze_hints.append(state)
+        elif orientation_samples[index] is None and index < len(pose_backed_flags) and pose_backed_flags[index]:
+            gaze_hints.append("present_unknown")
+        else:
+            gaze_hints.append(None)
     gaze = _calibrated_gaze_states(orientation_samples, cfg, gaze_hints)
     gaze_baseline_yaw = float(gaze["baseline_yaw"])
     gaze_baseline_pitch = float(gaze["baseline_pitch"])
@@ -1325,14 +1351,23 @@ def score_timeline(
     direct = int(gaze["direct"])
     orientation_states = list(gaze["states"])
 
+    orientation_unknown = int(gaze.get("orientation_unknown", 0))
+    # Present counts the frames the presenter was in shot, which now includes
+    # the ones where only the body was seen.
     visible=max(0,sampled-away)
-    f_pct=100*forward/sampled
+    # Attention percentages are shares of the frames whose orientation could
+    # actually be measured. Dividing by every sampled frame would quietly count
+    # an unmeasurable frame as "not engaged".
+    oriented = max(0, sampled - away - held - orientation_unknown)
+    oriented_or_all = oriented if oriented else sampled
+    f_pct=100*forward/oriented_or_all
     # "looking away" means clearly off-axis; held is its own visible/uncertain state.
-    l_pct=100*off_axis/sampled
-    slight_pct=100*slight_off/sampled
+    l_pct=100*off_axis/oriented_or_all
+    slight_pct=100*slight_off/oriented_or_all
     a_pct=100*away/sampled
     held_pct=100*held/sampled
-    distribution_total_pct = float(f_pct + slight_pct + l_pct + a_pct + held_pct)
+    unknown_pct=100*orientation_unknown/sampled
+    distribution_total_pct = float(f_pct + slight_pct + l_pct)
     direct_pct=100*direct/visible if visible else 0.0
     vf_pct=100*forward/visible if visible else 0.0
 
@@ -1435,6 +1470,11 @@ def score_timeline(
         )
 
     camera_attention=clamp(.18*presence_score+.62*engagement_score+.20*min(presence_score,engagement_score))
+    # Attention is mostly a statement about where the presenter was looking, so
+    # it needs enough frames where that could be measured. A fifth of the
+    # session is the floor; below it the number would be an opinion about
+    # frames nobody looked at.
+    attention_reliable = oriented >= max(3, int(round(0.2 * sampled)))
 
     reliability = len(posture_scores)/max(1,pose_attempts)
     mean_pose_quality = safe_mean(pose_quality_values)
@@ -1523,7 +1563,14 @@ def score_timeline(
     # Only measured things are averaged. Posture was already gated this way;
     # head stability now is too, so a component with no observations behind it
     # cannot lift or lower the grade.
-    components=[(camera_attention,cfg.attention_weight)]
+    if attention_reliable:
+        components=[(camera_attention,cfg.attention_weight)]
+    else:
+        # Orientation was not measurable often enough to judge attention, but
+        # presence was measured - the body model saw them. Presence carries the
+        # weight rather than a number nobody measured, and `camera_attention` is
+        # reported as null so the report does not imply otherwise.
+        components=[(presence_score,cfg.attention_weight)]
     if head_stability_reliable:
         components.append((head_stability,cfg.head_stability_weight))
     if posture_is_reliable:
@@ -1550,7 +1597,7 @@ def score_timeline(
     scores={
         "presence":round(presence_score,1),
         "engagement":round(engagement_score,1),
-        "camera_attention":round(camera_attention,1),
+        "camera_attention":round(camera_attention,1) if attention_reliable else None,
         # None rather than a default when the head was never observed.
         "head_stability":round(head_stability,1) if head_stability_reliable else None,
         # Do not manufacture a posture/gesture number when the camera cannot
@@ -1569,6 +1616,9 @@ def score_timeline(
     metrics={
         "duration_seconds":round(duration,3),
         "duration_source":duration_source,
+        # Frames the presenter was visibly in, but whose head orientation could
+        # not be measured. High here means the attention numbers rest on little.
+        "orientation_unknown_percent":round(unknown_pct,1),
         "source_fps":round(source_fps,3),
         "sample_fps_target":cfg.sample_fps,
         "sample_fps_effective":round(effective_sample_fps,3),
@@ -1672,7 +1722,13 @@ def score_timeline(
     feedback=[]
     if presence_score < 70:
         feedback.append(f"You were not consistently visible in frame (presence {presence_score:.0f}/100).")
-    if gaze_violation["repeat_triggered"]:
+    # Every line below is a claim about where the presenter was looking, so
+    # none of them may be made when that was never measured. Saying "your head
+    # was often off axis" to somebody whose head angle was unreadable in every
+    # frame is not advice, it is noise.
+    if not attention_reliable:
+        pass
+    elif gaze_violation["repeat_triggered"]:
         feedback.append("Repeated short look-away periods accumulated into a camera-attention warning; reconnect with the audience more consistently.")
     elif engagement_score < 60:
         feedback.append("Your head orientation was frequently well off the camera/audience axis; re-center more often around key points.")
@@ -1680,6 +1736,12 @@ def score_timeline(
         feedback.append("Head orientation was mixed: several off-axis periods reduced camera attention.")
     elif engagement_score >= 86:
         feedback.append("Head orientation stayed well centered overall; brief natural glances were not heavily penalized.")
+    if not attention_reliable:
+        feedback.append(
+            "Eye contact could not be assessed: your face was not detectable in enough "
+            f"frames ({unknown_pct:.0f}% of the recording showed you without a readable "
+            "head angle). Face the camera more directly, or improve the lighting on your face."
+        )
     if head_stability_reliable and head_stability<60:
         feedback.append("Large head-direction changes were frequent; make transitions a little more controlled.")
     elif head_turn_violation["repeat_triggered"]:

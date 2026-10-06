@@ -618,14 +618,10 @@ def _classify_speech_state(
     # waveform contains them, so these two tests are deliberately not
     # overridable by it.
     modulation = float(raw.get("syllable_modulation_index", 0.0) or 0.0)
-    separation = float(raw.get("vad_otsu_separation_db", 0.0) or 0.0)
     if modulation < cfg.min_syllable_modulation_index:
-        # A held sound: a tone, a hum, a fan, a sustained note. Speech moves at
-        # the syllable rate and this does not.
-        return "NO_SPEECH_DETECTED"
-    if (separation < cfg.min_speech_separation_db_for_plausibility
-            and snr < cfg.min_speech_separation_db_for_plausibility):
-        # Steady broadband sound with no speech standing out of it.
+        # A held sound: a tone, a hum, a sustained note. Speech moves at the
+        # syllable rate and this does not. Deliberately the only acoustic veto
+        # here - see the config note for why a separation/SNR test was removed.
         return "NO_SPEECH_DETECTED"
 
     if snr < cfg.min_speech_snr_db_for_scoring and not (unimodal and transcript_evidence):

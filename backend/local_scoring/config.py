@@ -68,10 +68,19 @@ class AudioConfig:
     #:     speech (22 cases)   modulation >= 0.100, separation >= 2.51 dB
     #:     tones / hum / music modulation  = 0.000
     #:     white noise         separation  = 0.43 dB, SNR 0.25 dB
-    min_syllable_modulation_index: float = 0.05
-    #: Separation or SNR - either is enough, so continuous speech in a quiet
-    #: room (which has little background to separate from) still passes.
-    min_speech_separation_db_for_plausibility: float = 1.0
+    #: Only an unambiguously held sound is refused. Measured: pure tones, hums
+    #: and sustained notes read exactly 0.000, while speech reads 0.100 at worst
+    #: and still 0.077 after aggressive microphone AGC and 4:1 compression - so
+    #: 0.02 keeps a factor of four in hand on the side that matters.
+    #:
+    #: A separation/SNR veto sat here too and has been removed. Continuous
+    #: speech with no pauses has little background to separate from, which makes
+    #: it look exactly like steady noise by that measure, and refusing it costs
+    #: the user their entire voice report. Spectral flatness was tried as a way
+    #: to tell the two apart and does not: speech reaches 0.549 against white
+    #: noise at 0.562. Between scoring a fan nobody submits and refusing a talk
+    #: somebody gave, the second is the worse mistake.
+    min_syllable_modulation_index: float = 0.02
 
     # Strict non-lexical fillers. Elongated forms such as "ummm" and "uhhh"
     # are normalized by the counter so the literal list does not need every form.
