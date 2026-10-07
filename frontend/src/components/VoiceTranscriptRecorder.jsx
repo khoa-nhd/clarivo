@@ -159,12 +159,67 @@ export default function VoiceTranscriptRecorder({
     setError('')
     setNotice('Preparing recording…')
     try {
-      const [transcription, wavBlob] = await Promise.all([
+      // Settled, not all. Transcription is an external call and the most likely
+      // of the two to fail; converting the audio for analysis is local and
+      // nearly always succeeds. Failing them together meant a transient
+      // Whisper error threw away a recording that was perfectly good - the user
+      // lost the voice AND visual analysis of a talk they had just given, even
+      // though the transcript box has always been editable by hand.
+      const [transcription, conversion] = await Promise.allSettled([
         transcribeAudio(audioBlob, { durationSeconds, topic }),
         compressedAudioToWav(audioBlob, 16000),
       ])
-      setTranscript(transcription.text || '')
-      setNotice('Transcript ready. Review it before analysis.')
+
+      if (conversion.status === 'rejected') {
+        // Without the converted audio there is nothing to analyse, so this one
+        // really is fatal.
+        throw conversion.reason || new Error('Could not prepare this recording for analysis.')
+      }
+
+      const wavBlob = conversion.value
+      const transcribed = transcription.status === 'fulfilled' ? transcription.value : null
+      const text = transcribed?.text || ''
+
+      // Did the capture actually last as long as the clock said?
+      //
+      // A browser that was backgrounded, ran out of memory, or lost the device
+      // mid-take yields a recording far shorter than the elapsed time, and the
+      // first sign of it is a transcription failure that blames the service.
+      // The WAV is 16 kHz 16-bit mono, so its length is an exact measure of how
+      // much audio actually survived. Comparing that against the wall clock
+      // names the real problem instead.
+      const capturedSeconds = Math.max(0, (wavBlob.size - 44) / (16000 * 2))
+      if (durationSeconds >= 20 && capturedSeconds < durationSeconds * 0.6) {
+        setNotice('')
+        setError(
+          `Only ${Math.round(capturedSeconds)}s of audio was captured out of ${durationSeconds}s of recording. ` +
+          'That usually means the tab was in the background or switched away from while recording. ' +
+          'Keep this tab visible and record again.',
+        )
+        setTranscribing(false)
+        return
+      }
+
+      setTranscript(text)
+      if (transcription.status === 'rejected') {
+        setNotice('')
+        setError(
+          `${transcription.reason?.message || 'Transcription failed.'} ` +
+          'Your recording has been kept - type what you said into the transcript box ' +
+          'below and the voice and visual analysis will still run, or press Retry processing.',
+        )
+      } else {
+        setError('')
+        setNotice(
+          text.trim()
+            ? 'Transcript ready. Review it before analysis.'
+            : 'No speech was detected. Type what you said into the transcript box below; '
+              + 'the voice and visual analysis will still run.',
+        )
+      }
+
+      // Handed over either way. The recording is what the delivery analysis
+      // needs; the transcript only improves it.
       onMediaReady?.({
         audioBlob: wavBlob,
         videoBlob: videoBlob || null,
@@ -173,9 +228,9 @@ export default function VoiceTranscriptRecorder({
         videoMimeType: videoBlob?.type || '',
         audioSizeBytes: wavBlob.size,
         videoSizeBytes: videoBlob?.size || 0,
-        transcriptionModel: transcription.model,
-        transcriptionWordCount: transcription.word_count,
-        rawTranscript: transcription.text || '',
+        transcriptionModel: transcribed?.model,
+        transcriptionWordCount: transcribed?.word_count,
+        rawTranscript: text,
         language: 'en',
       })
     } catch (processingError) {
